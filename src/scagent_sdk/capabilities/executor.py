@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import filecmp
 import inspect
 import json
 import os
@@ -975,8 +976,63 @@ class CapabilityExecutor:
             )
         except _AlreadyCommitted:
             return False
+        # Dedup after the commit is durable, not under the session lock: the parent is already
+        # immutable and hard-linking never changes content, so it is safe to do outside the lock and
+        # must never fail a commit that already succeeded.
+        parent_id = data.get("lineage", {}).get("resolved_input_execution_id")
+        with suppress(OSError):
+            self._dedup_against_parent(execution_id, parent_id)
         self.session.refresh_outputs_best_effort()
         return True
+
+    def _dedup_against_parent(self, execution_id: str, parent_execution_id: Any) -> tuple[int, int]:
+        """Hard-link a committed artifact's files to byte-identical files in its lineage parent.
+
+        A step usually changes only part of the matrix (adds an embedding, an obs column), so most
+        of a ``.zarr`` store's chunk files are byte-identical to the parent version's. Replacing
+        each such file with a hard link to the parent's frozen copy makes the two versions share
+        bytes on disk; retention's reclaimable accounting (which measures by ``st_nlink``) then
+        reflects the true cost of a prune. Artifacts are immutable, so sharing an inode is safe.
+
+        Best-effort and per-file guarded: any file that cannot be linked -- cross-device, a race --
+        simply keeps its own independent copy. Returns ``(linked_files, reclaimed_bytes)``.
+        """
+
+        if not isinstance(parent_execution_id, str) or not parent_execution_id:
+            return (0, 0)
+        new_root = self.artifact_root / execution_id
+        parent_root = self.artifact_root / parent_execution_id
+        if not new_root.is_dir() or not parent_root.is_dir():
+            return (0, 0)
+        linked = 0
+        reclaimed = 0
+        for new_file in sorted(new_root.rglob("*")):
+            if not new_file.is_file() or new_file.is_symlink():
+                continue
+            parent_file = parent_root / new_file.relative_to(new_root)
+            if not parent_file.is_file() or parent_file.is_symlink():
+                continue
+            link_tmp: Path | None = None
+            try:
+                new_stat = new_file.stat()
+                parent_stat = parent_file.stat()
+                if (new_stat.st_dev, new_stat.st_ino) == (parent_stat.st_dev, parent_stat.st_ino):
+                    continue  # already one inode
+                if new_stat.st_dev != parent_stat.st_dev or new_stat.st_size != parent_stat.st_size:
+                    continue  # cross-device (cannot link) or different size (cannot match)
+                if not filecmp.cmp(new_file, parent_file, shallow=False):
+                    continue
+                link_tmp = new_file.with_name(f".{new_file.name}.dedup-{uuid4().hex}")
+                os.link(parent_file, link_tmp)
+                os.replace(link_tmp, new_file)  # atomic swap; frees the new file's own inode
+                linked += 1
+                reclaimed += new_stat.st_size
+            except OSError:
+                if link_tmp is not None:
+                    with suppress(OSError):
+                        link_tmp.unlink()
+                continue
+        return (linked, reclaimed)
 
     def commit_from_hook(self, input_data: dict[str, Any]) -> bool:
         execution_id = _find_execution_id(input_data.get("tool_response", input_data))

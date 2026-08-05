@@ -228,6 +228,36 @@ tools:
     assert (store / "X" / "0.0").stat().st_size == 100
 
 
+def test_dedup_hard_links_only_byte_identical_files(tmp_path: Path) -> None:
+    session = AnalysisSession.create(tmp_path / "sessions", title="dedup")
+    executor = CapabilityExecutor(session)
+    parent = executor.artifact_root / "P"
+    child = executor.artifact_root / "C"
+    (parent / "X").mkdir(parents=True)
+    (child / "X").mkdir(parents=True)
+    chunk = b"chunk" * 100
+    (parent / "X" / "0.0").write_bytes(chunk)  # identical to child -> linked
+    (child / "X" / "0.0").write_bytes(chunk)
+    (parent / "same").write_bytes(b"abc")  # identical -> linked
+    (child / "same").write_bytes(b"abc")
+    (parent / "diff").write_bytes(b"aaa")  # differs -> left as its own copy
+    (child / "diff").write_bytes(b"bbb")
+    (child / "only-child").write_bytes(b"z")  # no parent counterpart -> untouched
+
+    linked, freed = executor._dedup_against_parent("C", "P")
+
+    assert linked == 2
+    assert freed == len(chunk) + len(b"abc")
+    assert (child / "X" / "0.0").stat().st_ino == (parent / "X" / "0.0").stat().st_ino
+    assert (child / "same").stat().st_ino == (parent / "same").stat().st_ino
+    assert (child / "diff").stat().st_ino != (parent / "diff").stat().st_ino
+    assert (child / "diff").read_bytes() == b"bbb"  # differing file untouched
+    assert (child / "X" / "0.0").read_bytes() == chunk  # linked content intact
+    # idempotent, and a missing parent is a no-op
+    assert executor._dedup_against_parent("C", "P") == (0, 0)
+    assert executor._dedup_against_parent("C", None) == (0, 0)
+
+
 def test_committed_python_code_is_mirrored_into_code_dir(tmp_path: Path) -> None:
     skill = tmp_path / "skills" / "coder"
     (skill / "scripts").mkdir(parents=True)

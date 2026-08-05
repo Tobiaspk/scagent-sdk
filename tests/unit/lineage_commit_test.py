@@ -185,6 +185,20 @@ def test_parent_is_the_artifact_actually_consumed(tmp_path: Path) -> None:
     assert ancestry(harness.lineage, second) == [second, first]
 
 
+def test_committing_a_child_hard_links_unchanged_files_to_its_parent(tmp_path: Path) -> None:
+    # make_matrix writes identical bytes, so a child that descends from a parent should have its
+    # matrix.h5ad hard-linked onto the parent's inode at commit (ADR 0011 P1 dedup).
+    harness = _Harness(tmp_path, "dedup-chain")
+    first = harness.run("make_matrix")
+    second = harness.run("make_matrix", path=harness.matrix_path(first))
+
+    parent_matrix = Path(harness.matrix_path(first))
+    child_matrix = Path(harness.matrix_path(second))
+    assert child_matrix.read_bytes() == b"H5AD"  # content intact
+    assert child_matrix.stat().st_ino == parent_matrix.stat().st_ino  # shared inode
+    assert parent_matrix.stat().st_nlink >= 2
+
+
 def test_a_sweep_from_one_parent_now_needs_explicit_branch_intent(tmp_path: Path) -> None:
     """A resolution sweep used to be expressible by passing the same parent repeatedly.
 
