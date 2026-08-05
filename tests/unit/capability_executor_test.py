@@ -177,6 +177,57 @@ def test_executor_enforces_scientific_floors_without_sdk_hook(tmp_path: Path) ->
     assert "\n" not in summary
 
 
+def test_store_directory_artifact_is_sized_by_tree_and_committed_intact(tmp_path: Path) -> None:
+    # A .zarr store is one artifact that is a directory, not a single file. The executor must
+    # accept it, record its size as the sum of member files, and commit the whole tree intact.
+    skill = tmp_path / "skills" / "storer"
+    (skill / "scripts").mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\nname: storer\ndescription: writes a store\n---\n", encoding="utf-8"
+    )
+    (skill / "capability.yaml").write_text(
+        """\
+schema_version: 1
+skill: {id: storer, version: "1", description: test}
+tools:
+  - name: write_store
+    description: write a zarr-like store directory
+    entrypoint: scripts/run.py:run
+    input_schema: {type: object}
+""",
+        encoding="utf-8",
+    )
+    (skill / "scripts" / "run.py").write_text(
+        "def run(arguments, context):\n"
+        "    store = context.staging_dir / 'matrix.zarr'\n"
+        "    (store / 'X').mkdir(parents=True)\n"
+        "    (store / '.zgroup').write_bytes(b'0123456789')\n"      # 10 bytes
+        "    (store / 'X' / '0.0').write_bytes(b'x' * 100)\n"       # 100 bytes
+        "    return {'summary': 'wrote a store',\n"
+        "            'details': {}, 'facts_patch': {},\n"
+        "            'artifacts': [{'name': 'matrix',\n"
+        "                           'relative_path': 'matrix.zarr',\n"
+        "                           'media_type': 'application/octet-stream'}]}\n",
+        encoding="utf-8",
+    )
+    package = CapabilityRegistry(skill.parent).discover()[0]
+    session = AnalysisSession.create(tmp_path / "sessions", title="store")
+    executor = CapabilityExecutor(session)
+
+    response = asyncio.run(executor.execute(package, package.manifest.tools[0], {}))
+    envelope = response["structuredContent"]
+    assert envelope["status"] == "validated"
+    produced = envelope["files"][0]
+    assert produced["relative_path"] == "matrix.zarr"
+    assert produced["size_bytes"] == 110  # summed over the tree, not a single stat()
+
+    assert executor.commit_from_hook({"tool_response": response}) is True
+    artifact = session.store.state.artifacts[envelope["scagent_execution_id"]]
+    store = session.directory / artifact["path"] / "matrix.zarr"
+    assert (store / ".zgroup").read_bytes() == b"0123456789"
+    assert (store / "X" / "0.0").stat().st_size == 100
+
+
 def test_committed_python_code_is_mirrored_into_code_dir(tmp_path: Path) -> None:
     skill = tmp_path / "skills" / "coder"
     (skill / "scripts").mkdir(parents=True)

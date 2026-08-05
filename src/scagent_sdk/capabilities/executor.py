@@ -164,6 +164,12 @@ def _matrix_output(tool: CapabilityTool, files: list[dict[str, Any]]) -> str | N
     return None
 
 
+def _tree_size(root: Path) -> int:
+    """Total bytes of a store artifact's member files (a ``.zarr`` directory is one artifact)."""
+
+    return sum(item.stat().st_size for item in root.rglob("*") if item.is_file())
+
+
 def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
@@ -613,14 +619,21 @@ class CapabilityExecutor:
                 raise CapabilityExecutionError(
                     f"artifact escapes staging directory: {produced.relative_path}"
                 ) from exc
-            if not source.is_file():
+            # An artifact is either a single file (.h5ad) or a store directory (.zarr). The whole
+            # staging tree is moved atomically at commit, so a directory needs no special promotion;
+            # its recorded size is the sum of its member files rather than one stat().
+            if source.is_file():
+                size_bytes = source.stat().st_size
+            elif source.is_dir():
+                size_bytes = _tree_size(source)
+            else:
                 raise CapabilityExecutionError(f"declared artifact does not exist: {source}")
             files.append(
                 {
                     "name": produced.name,
                     "relative_path": produced.relative_path,
                     "media_type": produced.media_type,
-                    "size_bytes": source.stat().st_size,
+                    "size_bytes": size_bytes,
                 }
             )
         dispatch_lineage = dict(dispatch or {})
