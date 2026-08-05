@@ -50,6 +50,12 @@ GRID_BACKGROUND_COLOR = "#cccccc"
 # --- pure helpers -------------------------------------------------------------
 
 
+def _read_matrix(path):
+    """Read an AnnData artifact, tolerating both .h5ad files and .zarr stores (ADR 0011)."""
+    import anndata as ad
+
+    return ad.read_zarr(path) if str(path).endswith(".zarr") else ad.read_h5ad(path)
+
 def resolve_value_key(key: str, obs_columns: list[str], var_names: list[str]) -> tuple[str, str]:
     """Resolve a requested color/value key to an obs column or a gene, or explain the failure."""
 
@@ -365,12 +371,11 @@ def is_mito(symbol: str) -> bool:
 
 
 def _load(arguments: dict[str, Any]) -> tuple[Path, Any]:
-    import scanpy as sc
 
     path = Path(str(arguments["path"])).expanduser().resolve()
     if not path.is_file():
         raise FileNotFoundError(path)
-    return path, sc.read_h5ad(path)
+    return path, _read_matrix(path)
 
 
 def _figure(context: Any, name: str, title: str) -> dict[str, str]:

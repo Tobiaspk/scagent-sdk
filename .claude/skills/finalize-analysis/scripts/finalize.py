@@ -12,6 +12,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import recipe  # noqa: E402  (sibling module; path inserted above)
 
 
+def _read_matrix(path):
+    """Read an AnnData artifact, tolerating both .h5ad files and .zarr stores (ADR 0011)."""
+    import anndata as ad
+
+    return ad.read_zarr(path) if str(path).endswith(".zarr") else ad.read_h5ad(path)
+
 def _exact_mapping(mapping: dict[str, str], clusters: set[str], name: str) -> None:
     if set(mapping) != clusters:
         missing = sorted(clusters - set(mapping))
@@ -389,7 +395,7 @@ def _execute_finalization(arguments: dict[str, Any], context: Any) -> dict[str, 
     summary = parsed["summary"]
 
     path = Path(str(arguments["path"])).expanduser().resolve()
-    adata = sc.read_h5ad(path)
+    adata = _read_matrix(path)
     existing_columns = set(map(str, adata.obs.columns))
     clusters = (
         set(map(str, adata.obs[cluster_key].astype(str).unique()))

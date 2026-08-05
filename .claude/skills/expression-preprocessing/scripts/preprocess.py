@@ -8,6 +8,12 @@ from pathlib import Path
 from typing import Any
 
 
+def _read_matrix(path):
+    """Read an AnnData artifact, tolerating both .h5ad files and .zarr stores (ADR 0011)."""
+    import anndata as ad
+
+    return ad.read_zarr(path) if str(path).endswith(".zarr") else ad.read_h5ad(path)
+
 def _identity(kind: str, value: Any) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()
     return f"{kind}:sha256:{hashlib.sha256(encoded).hexdigest()}"
@@ -37,7 +43,7 @@ def normalize_expression(arguments: dict[str, Any], context: Any) -> dict[str, A
         raise FileNotFoundError(path)
     layer = str(arguments.get("counts_layer", "counts"))
     target_sum = float(arguments.get("target_sum", 10000))
-    adata = sc.read_h5ad(path)
+    adata = _read_matrix(path)
     adata.X = _count_matrix(adata, layer).copy()
     sc.pp.normalize_total(adata, target_sum=target_sum)
     sc.pp.log1p(adata)
@@ -128,7 +134,7 @@ def select_hvg(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     layer = str(layer_arg) if layer_arg is not None else None
     batch_arg = arguments.get("batch_key")
     batch_key = str(batch_arg) if batch_arg is not None else None
-    adata = sc.read_h5ad(path)
+    adata = _read_matrix(path)
     if layer is not None and layer not in adata.layers:
         raise ValueError(f"layer {layer!r} is absent")
     if batch_key is not None and batch_key not in adata.obs:

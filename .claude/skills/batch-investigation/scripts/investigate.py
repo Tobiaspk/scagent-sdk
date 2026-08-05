@@ -109,6 +109,12 @@ _BROAD_CONTEXT_GENES = frozenset(
 )
 
 
+def _read_matrix(path):
+    """Read an AnnData artifact, tolerating both .h5ad files and .zarr stores (ADR 0011)."""
+    import anndata as ad
+
+    return ad.read_zarr(path) if str(path).endswith(".zarr") else ad.read_h5ad(path)
+
 def gene_class(gene: str) -> str:
     """Classify a gene symbol as ``nuisance``, ``broad``, or ``discriminating``."""
     symbol = str(gene).upper()
@@ -535,7 +541,7 @@ def run_evidence(arguments: dict[str, Any], context: Any) -> dict[str, Any]:  # 
 
     if not path.is_file():
         raise FileNotFoundError(path)
-    adata = sc.read_h5ad(path)
+    adata = _read_matrix(path)
     if cluster_key not in adata.obs:
         raise ValueError(f"observation column {cluster_key!r} is absent")
     ident = _resolve_input_identities(adata.uns.get("scagent_sdk", {}), adata, cluster_key)

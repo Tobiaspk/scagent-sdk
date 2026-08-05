@@ -9,13 +9,18 @@ from pathlib import Path
 from typing import Any
 
 
+def _read_matrix(path):
+    """Read an AnnData artifact, tolerating both .h5ad files and .zarr stores (ADR 0011)."""
+    import anndata as ad
+
+    return ad.read_zarr(path) if str(path).endswith(".zarr") else ad.read_h5ad(path)
+
 def _identity(kind: str, value: Any) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()
     return f"{kind}:sha256:{hashlib.sha256(encoded).hexdigest()}"
 
 
 def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
-    import scanpy as sc
     import scvi
 
     path = Path(str(arguments["path"])).expanduser().resolve()
@@ -24,7 +29,7 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     n_layers = int(arguments.get("n_layers", 2))
     max_epochs = int(arguments.get("max_epochs", 200))
     seed = int(arguments.get("random_seed", 0))
-    adata = sc.read_h5ad(path)
+    adata = _read_matrix(path)
     if batch_key not in adata.obs:
         raise ValueError(f"batch key {batch_key!r} is absent")
     if "counts" not in adata.layers:

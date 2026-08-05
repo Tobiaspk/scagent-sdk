@@ -10,6 +10,12 @@ from typing import Any
 SAMPLE_BYTES = 1024 * 1024
 
 
+def _read_matrix(path):
+    """Read an AnnData artifact, tolerating both .h5ad files and .zarr stores (ADR 0011)."""
+    import anndata as ad
+
+    return ad.read_zarr(path) if str(path).endswith(".zarr") else ad.read_h5ad(path)
+
 def _identity(kind: str, value: Any) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()
     return f"{kind}:sha256:{hashlib.sha256(encoded).hexdigest()}"
@@ -249,7 +255,7 @@ def _execute_evidence(arguments: dict[str, Any], context: Any) -> dict[str, Any]
     path = Path(str(arguments["path"])).expanduser().resolve()
     if not path.is_file() or path.suffix.lower() != ".h5ad":
         raise ValueError("doublet evidence requires an H5AD file")
-    adata = sc.read_h5ad(path)
+    adata = _read_matrix(path)
     raw_provenance = adata.uns.get("scagent_sdk")
     provenance = dict(raw_provenance) if isinstance(raw_provenance, dict) else {}
     if not bool(arguments.get("overwrite_existing_predictions", False)) and any(
@@ -626,7 +632,7 @@ def _execute_review(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     if not path.is_file():
         raise FileNotFoundError(path)
     decision, rationale, _confirmed, maximum = _review_parameters(arguments)
-    adata = sc.read_h5ad(path)
+    adata = _read_matrix(path)
     provenance = adata.uns.get("scagent_sdk")
     evidence = _current_evidence(context, path, provenance)
     if "predicted_doublet" not in adata.obs:

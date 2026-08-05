@@ -20,6 +20,12 @@ _SYMBOL_COLUMNS = (
 )
 
 
+def _read_matrix(path):
+    """Read an AnnData artifact, tolerating both .h5ad files and .zarr stores (ADR 0011)."""
+    import anndata as ad
+
+    return ad.read_zarr(path) if str(path).endswith(".zarr") else ad.read_h5ad(path)
+
 def _identity(kind: str, value: Any) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()
     return f"{kind}:sha256:{hashlib.sha256(encoded).hexdigest()}"
@@ -93,7 +99,7 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
             f"CellTypist model is not cached: {model_path}. Choose a local model; "
             "downloads are not implicit."
         )
-    adata = sc.read_h5ad(path)
+    adata = _read_matrix(path)
     counts, count_source = _select_counts(adata, counts_layer)
     _validate_counts(counts, label=count_source)
     ct_model = models.Model.load(str(model_path))
@@ -213,7 +219,6 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
 def summarize_by_cluster(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     import numpy as np
     import pandas as pd
-    import scanpy as sc
 
     path = Path(str(arguments["path"])).expanduser().resolve()
     if not path.is_file():
@@ -223,7 +228,7 @@ def summarize_by_cluster(arguments: dict[str, Any], context: Any) -> dict[str, A
     confidence_key = str(
         arguments.get("confidence_key", "celltypist_prediction_confidence")
     )
-    adata = sc.read_h5ad(path)
+    adata = _read_matrix(path)
     for key in (cluster_key, prediction_key, confidence_key):
         if key not in adata.obs:
             raise ValueError(f"obs key {key!r} is absent")

@@ -8,18 +8,23 @@ from pathlib import Path
 from typing import Any
 
 
+def _read_matrix(path):
+    """Read an AnnData artifact, tolerating both .h5ad files and .zarr stores (ADR 0011)."""
+    import anndata as ad
+
+    return ad.read_zarr(path) if str(path).endswith(".zarr") else ad.read_h5ad(path)
+
 def _identity(kind: str, value: Any) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()
     return f"{kind}:sha256:{hashlib.sha256(encoded).hexdigest()}"
 
 
 def _load(arguments: dict[str, Any]) -> tuple[Path, Any]:
-    import scanpy as sc
 
     path = Path(str(arguments["path"])).expanduser().resolve()
     if not path.is_file():
         raise FileNotFoundError(path)
-    return path, sc.read_h5ad(path)
+    return path, _read_matrix(path)
 
 
 def cluster_cells(arguments: dict[str, Any], context: Any) -> dict[str, Any]:

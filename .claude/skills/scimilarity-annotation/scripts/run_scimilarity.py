@@ -36,6 +36,12 @@ __all__ = [
 ]
 
 
+def _read_matrix(path):
+    """Read an AnnData artifact, tolerating both .h5ad files and .zarr stores (ADR 0011)."""
+    import anndata as ad
+
+    return ad.read_zarr(path) if str(path).endswith(".zarr") else ad.read_h5ad(path)
+
 def _vote_confidence(stats: Any, *, weighting: bool, n_obs: int) -> dict[str, Any]:
     """Per-cell kNN vote margins, named for what they mean rather than for SCimilarity's columns.
 
@@ -78,7 +84,6 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     import anndata as ad
     import numpy as np
     import pandas as pd
-    import scanpy as sc
     from scimilarity import CellAnnotation
     from scimilarity.utils import align_dataset, lognorm_counts
 
@@ -95,7 +100,7 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     weighting = bool(arguments.get("weighting", False))
     requested_celltypes = arguments.get("target_celltypes") or None
 
-    adata = sc.read_h5ad(path)
+    adata = _read_matrix(path)
     counts, count_source = _select_counts(adata, counts_layer)
     _validate_counts(counts, label=count_source)
     species = verify_species(
@@ -322,14 +327,13 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
 
 def summarize_by_cluster(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     import pandas as pd
-    import scanpy as sc
 
     path = Path(str(arguments["path"])).expanduser().resolve()
     if not path.is_file():
         raise FileNotFoundError(path)
     cluster_key = str(arguments["cluster_key"])
     prediction_key = str(arguments.get("prediction_key", "scimilarity_prediction"))
-    adata = sc.read_h5ad(path)
+    adata = _read_matrix(path)
     if cluster_key not in adata.obs:
         raise ValueError(f"cluster key {cluster_key!r} is absent")
     if prediction_key not in adata.obs:

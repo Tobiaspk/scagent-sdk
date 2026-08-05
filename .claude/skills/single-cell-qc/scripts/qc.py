@@ -19,6 +19,12 @@ _SYMBOL_COLUMNS = (
 )
 
 
+def _read_matrix(path):
+    """Read an AnnData artifact, tolerating both .h5ad files and .zarr stores (ADR 0011)."""
+    import anndata as ad
+
+    return ad.read_zarr(path) if str(path).endswith(".zarr") else ad.read_h5ad(path)
+
 def _identity(kind: str, value: Any) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()
     return f"{kind}:sha256:{hashlib.sha256(encoded).hexdigest()}"
@@ -440,7 +446,6 @@ def _write_qc_artifacts(
 
 
 def calculate_qc(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
-    import scanpy as sc
 
     path = Path(str(arguments["path"])).expanduser().resolve()
     if not path.is_file():
@@ -456,7 +461,7 @@ def calculate_qc(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
         "max_genes": int(max_arg) if max_arg is not None else None,
         "max_pct_mito": float(mito_arg) if mito_arg is not None else None,
     }
-    source = sc.read_h5ad(path)
+    source = _read_matrix(path)
     layer = _resolve_layer(source, layer)
     adata, flags = _add_metrics(source, layer=layer, organism=organism, **thresholds)
     metadata = _base_metadata(adata)
@@ -573,7 +578,6 @@ def review_qc(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
 
 
 def filter_cells(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
-    import scanpy as sc
 
     if arguments.get("confirm_filtering") is not True:
         raise ValueError("confirm_filtering must be true before changing the cell set")
@@ -591,7 +595,7 @@ def filter_cells(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
         "max_genes": int(max_arg) if max_arg is not None else None,
         "max_pct_mito": float(mito_arg) if mito_arg is not None else None,
     }
-    source = sc.read_h5ad(path)
+    source = _read_matrix(path)
     layer = _resolve_layer(source, layer)
     assessed, flags = _add_metrics(source, layer=layer, organism=organism, **thresholds)
     before = int(assessed.n_obs)
@@ -678,7 +682,6 @@ def filter_cells(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
 
 def filter_genes(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     import numpy as np
-    import scanpy as sc
 
     if arguments.get("confirm_filtering") is not True:
         raise ValueError("confirm_filtering must be true before changing the feature set")
@@ -688,7 +691,7 @@ def filter_genes(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     layer_arg = arguments.get("counts_layer", "auto")
     layer = str(layer_arg) if layer_arg is not None else None
     min_cells = int(arguments.get("min_cells", 3))
-    adata = sc.read_h5ad(path)
+    adata = _read_matrix(path)
     layer = _resolve_layer(adata, layer)
     counts = _matrix(adata, layer)
     detected = np.asarray((counts > 0).sum(axis=0)).ravel()

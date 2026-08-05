@@ -10,6 +10,12 @@ from pathlib import Path
 from typing import Any
 
 
+def _read_matrix(path):
+    """Read an AnnData artifact, tolerating both .h5ad files and .zarr stores (ADR 0011)."""
+    import anndata as ad
+
+    return ad.read_zarr(path) if str(path).endswith(".zarr") else ad.read_h5ad(path)
+
 def _identity(kind: str, value: Any) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()
     return f"{kind}:sha256:{hashlib.sha256(encoded).hexdigest()}"
@@ -153,7 +159,7 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     max_adjusted_pvalue = float(arguments.get("max_adjusted_pvalue", 0.05))
     min_overlap = int(arguments.get("min_marker_overlap", 2))
     use_cytopus = bool(arguments.get("use_cytopus", True))
-    adata = sc.read_h5ad(path)
+    adata = _read_matrix(path)
     if cluster_key not in adata.obs:
         raise ValueError(f"cluster key {cluster_key!r} is absent")
     provenance = adata.uns.get("scagent_sdk", {})

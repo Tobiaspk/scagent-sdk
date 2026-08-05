@@ -94,6 +94,12 @@ _BROAD_CONTEXT_GENES = frozenset(
 )
 
 
+def _read_matrix(path):
+    """Read an AnnData artifact, tolerating both .h5ad files and .zarr stores (ADR 0011)."""
+    import anndata as ad
+
+    return ad.read_zarr(path) if str(path).endswith(".zarr") else ad.read_h5ad(path)
+
 def gene_class(gene: str) -> str:
     """Classify a gene symbol as ``nuisance``, ``broad``, or ``discriminating``."""
     symbol = str(gene).upper()
@@ -363,7 +369,7 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:  # noqa: C90
     max_cells_structure = int(arguments.get("max_cells_for_structure", 3000))
     seed = int(arguments.get("random_seed", 0))
 
-    adata = sc.read_h5ad(path)
+    adata = _read_matrix(path)
     if cluster_key not in adata.obs:
         raise ValueError(f"cluster key {cluster_key!r} is absent")
     provenance = adata.uns.get("scagent_sdk", {})

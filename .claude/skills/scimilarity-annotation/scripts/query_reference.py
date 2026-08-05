@@ -85,6 +85,12 @@ _SAMPLE_LEVELS = ("study", "sample", "tissue", "disease")
 _BACKGROUND_COLUMNS = ("disease", "tissue_general")
 
 
+def _read_matrix(path):
+    """Read an AnnData artifact, tolerating both .h5ad files and .zarr stores (ADR 0011)."""
+    import anndata as ad
+
+    return ad.read_zarr(path) if str(path).endswith(".zarr") else ad.read_h5ad(path)
+
 def _plan_cell_queries(
     obs_names: list[str],
     *,
@@ -642,7 +648,6 @@ def _attach_background(reference: Any, summaries: list[dict[str, Any]], *, top_n
 def query(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     import anndata as ad
     import pandas as pd
-    import scanpy as sc
     from scimilarity import CellQuery
     from scimilarity.utils import align_dataset, lognorm_counts
     from scipy.sparse import csr_matrix
@@ -669,7 +674,7 @@ def query(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     summarize_samples = bool(arguments.get("summarize_samples", True))
     compare_background = bool(arguments.get("compare_to_reference_background", True))
 
-    adata = sc.read_h5ad(path)
+    adata = _read_matrix(path)
     counts, count_source = _select_counts(adata, counts_layer)
     _validate_counts(counts, label=count_source)
     species = verify_species(
