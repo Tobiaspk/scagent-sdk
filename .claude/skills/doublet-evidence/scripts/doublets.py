@@ -16,6 +16,17 @@ def _read_matrix(path):
 
     return ad.read_zarr(path) if str(path).endswith(".zarr") else ad.read_h5ad(path)
 
+
+def _write_matrix(adata, path):
+    """Write an AnnData artifact: a .zarr store (blosc) or a gzipped .h5ad file (ADR 0011)."""
+    import anndata as ad
+
+    if str(path).endswith(".zarr"):
+        ad.settings.zarr_write_format = 2  # v2 until the v3 sharding/dedup design lands
+        adata.write_zarr(path)
+    else:
+        adata.write_h5ad(path, compression="gzip")
+
 def _identity(kind: str, value: Any) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()
     return f"{kind}:sha256:{hashlib.sha256(encoded).hexdigest()}"
@@ -253,7 +264,7 @@ def _execute_evidence(arguments: dict[str, Any], context: Any) -> dict[str, Any]
     matplotlib.use("Agg")
     ad, plt, np, pd, rsc, sc = _scientific_modules()
     path = Path(str(arguments["path"])).expanduser().resolve()
-    if not path.is_file() or path.suffix.lower() != ".h5ad":
+    if not path.exists() or path.suffix.lower() not in (".h5ad", ".zarr"):
         raise ValueError("doublet evidence requires an H5AD file")
     adata = _read_matrix(path)
     raw_provenance = adata.uns.get("scagent_sdk")
@@ -446,7 +457,7 @@ def _execute_evidence(arguments: dict[str, Any], context: Any) -> dict[str, Any]
             ),
         },
     )
-    output_relative = "doublet-annotated.h5ad"
+    output_relative = "doublet-annotated.zarr"
     output_path = context.staging_dir / output_relative
     final_path = f"artifacts/capabilities/{context.execution_id}/{output_relative}"
     provenance = dict(provenance)
@@ -458,7 +469,7 @@ def _execute_evidence(arguments: dict[str, Any], context: Any) -> dict[str, Any]
         }
     )
     adata.uns["scagent_sdk"] = provenance
-    adata.write_h5ad(output_path, compression="gzip")
+    _write_matrix(adata, output_path)
     _write_report(
         context.staging_dir / "doublet-evidence.md",
         batch_key=batch_key,
@@ -503,7 +514,7 @@ def _execute_evidence(arguments: dict[str, Any], context: Any) -> dict[str, Any]
             {
                 "name": "doublet-annotated-anndata",
                 "relative_path": output_relative,
-                "media_type": "application/x-hdf5",
+                "media_type": "application/vnd.zarr",
             },
             {
                 "name": "doublet-calls",
@@ -629,7 +640,7 @@ def _execute_review(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     matplotlib.use("Agg")
     _ad, _plt, np, _pd, _rsc, sc = _scientific_modules()
     path = Path(str(arguments["path"])).expanduser().resolve()
-    if not path.is_file():
+    if not path.exists():
         raise FileNotFoundError(path)
     decision, rationale, _confirmed, maximum = _review_parameters(arguments)
     adata = _read_matrix(path)
@@ -686,7 +697,7 @@ def _execute_review(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
                 "removed_cells": n_predicted,
             },
         )
-        output_relative = "doublet-filtered-raw-counts.h5ad"
+        output_relative = "doublet-filtered-raw-counts.zarr"
         output_path = context.staging_dir / output_relative
         final_path = f"artifacts/capabilities/{context.execution_id}/{output_relative}"
         filtered.uns = {
@@ -708,7 +719,7 @@ def _execute_review(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
                 "source_count_location": count_source,
             },
         }
-        filtered.write_h5ad(output_path, compression="gzip")
+        _write_matrix(filtered, output_path)
         stat = output_path.stat()
         output_fingerprint = _dataset_fingerprint(output_path)
         filter_payload = {
@@ -762,7 +773,7 @@ def _execute_review(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
             {
                 "name": "doublet-filtered-raw-counts",
                 "relative_path": output_relative,
-                "media_type": "application/x-hdf5",
+                "media_type": "application/vnd.zarr",
             }
         )
     review = {

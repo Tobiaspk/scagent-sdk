@@ -100,6 +100,17 @@ def _read_matrix(path):
 
     return ad.read_zarr(path) if str(path).endswith(".zarr") else ad.read_h5ad(path)
 
+
+def _write_matrix(adata, path):
+    """Write an AnnData artifact: a .zarr store (blosc) or a gzipped .h5ad file (ADR 0011)."""
+    import anndata as ad
+
+    if str(path).endswith(".zarr"):
+        ad.settings.zarr_write_format = 2  # v2 until the v3 sharding/dedup design lands
+        adata.write_zarr(path)
+    else:
+        adata.write_h5ad(path, compression="gzip")
+
 def gene_class(gene: str) -> str:
     """Classify a gene symbol as ``nuisance``, ``broad``, or ``discriminating``."""
     symbol = str(gene).upper()
@@ -347,7 +358,7 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:  # noqa: C90
     from sklearn.metrics import silhouette_samples
 
     path = Path(str(arguments["path"])).expanduser().resolve()
-    if not path.is_file():
+    if not path.exists():
         raise FileNotFoundError(path)
     cluster_key = str(arguments.get("cluster_key", "leiden"))
     min_cells = int(arguments.get("min_cluster_cells", 20))
@@ -1478,7 +1489,7 @@ def _apply_cleanup(
         evidence=evidence,
         ident=ident,
     )
-    output_relative = "cluster-qc-filtered-raw-counts.h5ad"
+    output_relative = "cluster-qc-filtered-raw-counts.zarr"
     output_path = context.staging_dir / output_relative
     final_path = f"artifacts/capabilities/{context.execution_id}/{output_relative}"
     filtered.uns = {
@@ -1497,7 +1508,7 @@ def _apply_cleanup(
             "removal_fraction": evidence["cleanup"]["removal_fraction"],
         },
     }
-    filtered.write_h5ad(output_path, compression="gzip")
+    _write_matrix(filtered, output_path)
     stat = output_path.stat()
     fingerprint = _dataset_fingerprint(output_path)
     dataset_abs_path = str(
@@ -1530,7 +1541,7 @@ def _apply_cleanup(
         {
             "name": "cluster-qc-filtered-raw-counts",
             "relative_path": output_relative,
-            "media_type": "application/x-hdf5",
+            "media_type": "application/vnd.zarr",
         },
         {"name": "removed-cells", "relative_path": "removed-cells.csv", "media_type": "text/csv"},
     ]

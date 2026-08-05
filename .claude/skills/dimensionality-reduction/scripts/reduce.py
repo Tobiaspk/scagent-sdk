@@ -14,6 +14,17 @@ def _read_matrix(path):
 
     return ad.read_zarr(path) if str(path).endswith(".zarr") else ad.read_h5ad(path)
 
+
+def _write_matrix(adata, path):
+    """Write an AnnData artifact: a .zarr store (blosc) or a gzipped .h5ad file (ADR 0011)."""
+    import anndata as ad
+
+    if str(path).endswith(".zarr"):
+        ad.settings.zarr_write_format = 2  # v2 until the v3 sharding/dedup design lands
+        adata.write_zarr(path)
+    else:
+        adata.write_h5ad(path, compression="gzip")
+
 def _identity(kind: str, value: Any) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()
     return f"{kind}:sha256:{hashlib.sha256(encoded).hexdigest()}"
@@ -28,7 +39,7 @@ def _scanpy_umap_key(requested_key: str) -> str | None:
 def _load(arguments: dict[str, Any]) -> tuple[Path, Any]:
 
     path = Path(str(arguments["path"])).expanduser().resolve()
-    if not path.is_file():
+    if not path.exists():
         raise FileNotFoundError(path)
     return path, _read_matrix(path)
 
@@ -43,7 +54,7 @@ def _publish(
     artifact_name: str,
 ) -> tuple[str, list[dict[str, str]]]:
     final_path = f"artifacts/capabilities/{context.execution_id}/{output_name}"
-    adata.write_h5ad(context.staging_dir / output_name, compression="gzip")
+    _write_matrix(adata, context.staging_dir / output_name)
     (context.staging_dir / report_name).write_text(
         json.dumps(report, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8"
     )
@@ -51,7 +62,7 @@ def _publish(
         {
             "name": artifact_name,
             "relative_path": output_name,
-            "media_type": "application/x-hdf5",
+            "media_type": "application/vnd.zarr",
         },
         {
             "name": report_name.removesuffix(".json"),
@@ -149,7 +160,7 @@ def compute_pca(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     _, artifacts = _publish(
         adata,
         context,
-        output_name="pca.h5ad",
+        output_name="pca.zarr",
         report_name="pca.json",
         report=report,
         artifact_name="pca-anndata",
@@ -255,7 +266,7 @@ def build_neighbors(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     _, artifacts = _publish(
         adata,
         context,
-        output_name="neighbors.h5ad",
+        output_name="neighbors.zarr",
         report_name="neighbors.json",
         report=report,
         artifact_name="neighbors-anndata",
@@ -340,7 +351,7 @@ def compute_umap(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     _, artifacts = _publish(
         adata,
         context,
-        output_name="umap.h5ad",
+        output_name="umap.zarr",
         report_name="umap.json",
         report=report,
         artifact_name="umap-anndata",

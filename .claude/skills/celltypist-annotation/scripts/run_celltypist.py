@@ -26,6 +26,17 @@ def _read_matrix(path):
 
     return ad.read_zarr(path) if str(path).endswith(".zarr") else ad.read_h5ad(path)
 
+
+def _write_matrix(adata, path):
+    """Write an AnnData artifact: a .zarr store (blosc) or a gzipped .h5ad file (ADR 0011)."""
+    import anndata as ad
+
+    if str(path).endswith(".zarr"):
+        ad.settings.zarr_write_format = 2  # v2 until the v3 sharding/dedup design lands
+        adata.write_zarr(path)
+    else:
+        adata.write_h5ad(path, compression="gzip")
+
 def _identity(kind: str, value: Any) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()
     return f"{kind}:sha256:{hashlib.sha256(encoded).hexdigest()}"
@@ -85,7 +96,7 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     from celltypist import models
 
     path = Path(str(arguments["path"])).expanduser().resolve()
-    if not path.is_file():
+    if not path.exists():
         raise FileNotFoundError(path)
     model = str(arguments.get("model", "Immune_All_Low.pkl"))
     counts_arg = arguments.get("counts_layer", "counts")
@@ -149,9 +160,9 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
         }
     )
     adata.uns["scagent_sdk"] = metadata
-    output_name = "celltypist-annotated.h5ad"
+    output_name = "celltypist-annotated.zarr"
     final_path = f"artifacts/capabilities/{context.execution_id}/{output_name}"
-    adata.write_h5ad(context.staging_dir / output_name, compression="gzip")
+    _write_matrix(adata, context.staging_dir / output_name)
     cell_table = pd.DataFrame(
         {
             "cell": adata.obs_names.astype(str),
@@ -200,7 +211,7 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
             {
                 "name": "celltypist-annotated-anndata",
                 "relative_path": output_name,
-                "media_type": "application/x-hdf5",
+                "media_type": "application/vnd.zarr",
             },
             {
                 "name": "celltypist-cell-predictions",
@@ -221,7 +232,7 @@ def summarize_by_cluster(arguments: dict[str, Any], context: Any) -> dict[str, A
     import pandas as pd
 
     path = Path(str(arguments["path"])).expanduser().resolve()
-    if not path.is_file():
+    if not path.exists():
         raise FileNotFoundError(path)
     cluster_key = str(arguments["cluster_key"])
     prediction_key = str(arguments.get("prediction_key", "celltypist_prediction"))
