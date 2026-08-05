@@ -191,10 +191,15 @@ scimilarity's suite (or at minimum the annotation skill end-to-end) under py3.14
 
 ## Build order
 
-- **P0** — Generalize the executor past the single-`.h5ad` assumption (declare
-  `primary_matrix_output`, accept a `.zarr` store as an artifact). Add a Zarr writer path to the
-  skills that emit matrices, behind blosc/zstd. Round-trip and lineage tests. No dedup yet; this
-  alone gives the smaller/faster-codec win and unblocks everything else.
+- **P0 (landed on `feat/zarr-artifact-storage`)** — Executor accepts a `.zarr` store directory as a
+  first-class artifact, sized by its tree (the atomic staging move already carries a nested tree).
+  Every pipeline reader tolerates a `.zarr` input via a byte-identical `_read_matrix` recipe
+  (drift-guarded), and every intermediate writer emits a `.zarr` store via `_write_matrix` (blosc by
+  default); input guards relaxed `is_file()` → `exists()`; lineage reconstruction fallback recognizes
+  `.zarr`. `finalize` (portable deliverable), `convert` (`.h5ad`-only), and CellBender (`.h5`) keep
+  their native formats by decision. Proven: preprocess writes a real zarr v2 store live and it round
+  -trips; full deterministic suite green. No dedup yet — pre-dedup this is roughly size-neutral vs
+  gzip h5ad; the win is P1. Full multi-skill live validation belongs to a GPU session.
 - **P1** — Executor-owned hard-link dedup at promotion against the lineage parent, content-identity
   based. Wire retention to report the now-nonzero `shared`/`reclaimable`. This is the footprint
   payoff.
