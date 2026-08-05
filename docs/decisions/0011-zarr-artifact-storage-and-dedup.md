@@ -200,9 +200,15 @@ scimilarity's suite (or at minimum the annotation skill end-to-end) under py3.14
   their native formats by decision. Proven: preprocess writes a real zarr v2 store live and it round
   -trips; full deterministic suite green. No dedup yet — pre-dedup this is roughly size-neutral vs
   gzip h5ad; the win is P1. Full multi-skill live validation belongs to a GPU session.
-- **P1** — Executor-owned hard-link dedup at promotion against the lineage parent, content-identity
-  based. Wire retention to report the now-nonzero `shared`/`reclaimable`. This is the footprint
-  payoff.
+- **P1 (landed on `feat/zarr-artifact-storage`)** — After a result commits, the executor hard-links
+  every file in the new artifact that is byte-identical (same relative path) to its lineage parent
+  (`resolved_input_execution_id`) onto the parent's frozen inode. Runs post-commit, not under the
+  session lock; best-effort and per-file guarded (cross-device/race keeps its own copy, never fails a
+  commit). Retention needed no change — it already measures by `(dev, inode)`/`st_nlink`, so
+  `reclaimable` now diverges from `apparent`. Measured on a real read-modify-write cycle (read a
+  `.zarr`, add a clustering + UMAP, write a new `.zarr`): 99.7% of the child's bytes are byte
+  -identical to the parent (174/187 files) — that step stores ~0.05 MB of new bytes instead of
+  duplicating a 15 MB matrix. This is the footprint payoff.
 - **P2** — Guarded prune that frees only `reclaimable` bytes, plus the disposition vocabulary
   (`retained`/`pinned`/`rejected`) retention already flagged as missing. First point at which bytes
   are actually deleted.
