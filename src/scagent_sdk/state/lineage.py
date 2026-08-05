@@ -583,7 +583,7 @@ def rebuild_forest(
             str(item.get("relative_path"))
             for item in files
             if isinstance(item, Mapping)
-            and str(item.get("relative_path", "")).lower().endswith(".h5ad")
+            and str(item.get("relative_path", "")).lower().endswith((".h5ad", ".zarr"))
         ]
         matrices = declared or fallback
         if not declared and len(fallback) > 1:

@@ -14,6 +14,18 @@ def _read_matrix(path):
 
     return ad.read_zarr(path) if str(path).endswith(".zarr") else ad.read_h5ad(path)
 
+
+def _write_matrix(adata, path):
+    """Write an AnnData artifact: a .zarr store (blosc) or a gzipped .h5ad file (ADR 0011)."""
+    import anndata as ad
+
+    if str(path).endswith(".zarr"):
+        ad.settings.zarr_write_format = 2  # v2 until the v3 sharding/dedup design lands
+        adata.write_zarr(path)
+    else:
+        adata.write_h5ad(path, compression="gzip")
+
+
 def _identity(kind: str, value: Any) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()
     return f"{kind}:sha256:{hashlib.sha256(encoded).hexdigest()}"
@@ -39,7 +51,7 @@ def normalize_expression(arguments: dict[str, Any], context: Any) -> dict[str, A
     import scanpy as sc
 
     path = Path(str(arguments["path"])).expanduser().resolve()
-    if not path.is_file():
+    if not path.exists():
         raise FileNotFoundError(path)
     layer = str(arguments.get("counts_layer", "counts"))
     target_sum = float(arguments.get("target_sum", 10000))
@@ -68,8 +80,8 @@ def normalize_expression(arguments: dict[str, Any], context: Any) -> dict[str, A
         }
     )
     adata.uns["scagent_sdk"] = metadata
-    output_name = "log-normalized.h5ad"
-    adata.write_h5ad(context.staging_dir / output_name, compression="gzip")
+    output_name = "log-normalized.zarr"
+    _write_matrix(adata, context.staging_dir / output_name)
     report = {
         "method": "normalize_total+log1p",
         "target_sum": target_sum,
@@ -111,7 +123,7 @@ def normalize_expression(arguments: dict[str, Any], context: Any) -> dict[str, A
             {
                 "name": "log-normalized-anndata",
                 "relative_path": output_name,
-                "media_type": "application/x-hdf5",
+                "media_type": "application/vnd.zarr",
             },
             {
                 "name": "normalization-report",
@@ -126,7 +138,7 @@ def select_hvg(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     import scanpy as sc
 
     path = Path(str(arguments["path"])).expanduser().resolve()
-    if not path.is_file():
+    if not path.exists():
         raise FileNotFoundError(path)
     n_top = int(arguments.get("n_top_genes", 3000))
     flavor = str(arguments.get("flavor", "seurat"))
@@ -165,8 +177,8 @@ def select_hvg(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     )
     metadata["hvg_id"] = hvg_id
     adata.uns["scagent_sdk"] = metadata
-    output_name = "hvg-selected.h5ad"
-    adata.write_h5ad(context.staging_dir / output_name, compression="gzip")
+    output_name = "hvg-selected.zarr"
+    _write_matrix(adata, context.staging_dir / output_name)
     table = adata.var.loc[adata.var["highly_variable"]].copy()
     table.insert(0, "gene", table.index.astype(str))
     table.to_csv(context.staging_dir / "highly-variable-genes.csv", index=False)
@@ -207,7 +219,7 @@ def select_hvg(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
             {
                 "name": "hvg-anndata",
                 "relative_path": output_name,
-                "media_type": "application/x-hdf5",
+                "media_type": "application/vnd.zarr",
             },
             {
                 "name": "highly-variable-genes",

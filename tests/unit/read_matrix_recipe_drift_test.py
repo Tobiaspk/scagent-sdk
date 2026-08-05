@@ -19,6 +19,18 @@ CANON = (
     '    return ad.read_zarr(path) if str(path).endswith(".zarr") else ad.read_h5ad(path)'
 )
 
+CANON_WRITE = (
+    'def _write_matrix(adata, path):\n'
+    '    """Write an AnnData artifact: a .zarr store (blosc) or a gzipped .h5ad file (ADR 0011)."""\n'  # noqa: E501
+    '    import anndata as ad\n'
+    '\n'
+    '    if str(path).endswith(".zarr"):\n'
+    '        ad.settings.zarr_write_format = 2  # v2 until the v3 sharding/dedup design lands\n'
+    '        adata.write_zarr(path)\n'
+    '    else:\n'
+    '        adata.write_h5ad(path, compression="gzip")'
+)
+
 
 def test_read_matrix_helper_is_byte_identical_across_skills() -> None:
     holders = sorted(
@@ -26,7 +38,18 @@ def test_read_matrix_helper_is_byte_identical_across_skills() -> None:
         for p in SKILLS.glob("*/scripts/*.py")
         if "_read_matrix" in p.read_text(encoding="utf-8")
     )
-    # Every pipeline skill that reads a matrix carries the recipe; keep this from silently shrinking.
+    # Every matrix-reading skill carries the recipe; keep this from silently shrinking.
     assert len(holders) >= 15, f"expected the recipe in >=15 skills, found {len(holders)}"
     drifted = [str(p) for p in holders if CANON not in p.read_text(encoding="utf-8")]
     assert not drifted, f"_read_matrix drifted from canonical form in: {drifted}"
+
+
+def test_write_matrix_helper_is_byte_identical_across_skills() -> None:
+    holders = sorted(
+        p
+        for p in SKILLS.glob("*/scripts/*.py")
+        if "_write_matrix" in p.read_text(encoding="utf-8")
+    )
+    assert holders, "no skill carries the _write_matrix recipe"
+    drifted = [str(p) for p in holders if CANON_WRITE not in p.read_text(encoding="utf-8")]
+    assert not drifted, f"_write_matrix drifted from canonical form in: {drifted}"
