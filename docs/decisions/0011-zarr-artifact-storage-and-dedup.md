@@ -208,7 +208,12 @@ scimilarity's suite (or at minimum the annotation skill end-to-end) under py3.14
   `reclaimable` now diverges from `apparent`. Measured on a real read-modify-write cycle (read a
   `.zarr`, add a clustering + UMAP, write a new `.zarr`): 99.7% of the child's bytes are byte
   -identical to the parent (174/187 files) — that step stores ~0.05 MB of new bytes instead of
-  duplicating a 15 MB matrix. This is the footprint payoff.
+  duplicating a 15 MB matrix. This is the footprint payoff. **Correction (later commit `ff96ef0`):**
+  the first implementation (`d433ec4`) matched files by artifact-relative *path*, but each step
+  names its store differently (`pca.zarr` vs `neighbors.zarr`), so nothing matched on a real
+  pipeline (~0% dedup) — the unit tests reused one store name and missed it. Dedup now matches by
+  **content** (sha256, size-bucketed, filecmp collision guard). Verified on the real session's
+  `pca.zarr → neighbors.zarr`: 1272 files linked, 374 MB reclaimed (68% of the child) vs 0 before.
 - **P2** — Guarded prune that frees only `reclaimable` bytes, plus the disposition vocabulary
   (`retained`/`pinned`/`rejected`) retention already flagged as missing. First point at which bytes
   are actually deleted.
