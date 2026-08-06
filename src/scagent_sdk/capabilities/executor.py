@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import filecmp
+import hashlib
 import inspect
 import json
 import os
@@ -170,6 +171,16 @@ def _tree_size(root: Path) -> int:
     """Total bytes of a store artifact's member files (a ``.zarr`` directory is one artifact)."""
 
     return sum(item.stat().st_size for item in root.rglob("*") if item.is_file())
+
+
+def _file_digest(path: Path) -> str:
+    """Streaming sha256 of a file, used to content-address artifact files for dedup."""
+
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
@@ -1069,26 +1080,47 @@ class CapabilityExecutor:
         parent_root = self._committed_artifact_dir(parent_execution_id)
         if new_root is None or parent_root is None:
             return (0, 0)
+        child_files = [
+            item
+            for item in sorted(new_root.rglob("*"))
+            if item.is_file() and not item.is_symlink()
+        ]
+        if not child_files:
+            return (0, 0)
+        # Match by CONTENT, not by path. Each step names its store differently (pca.zarr vs
+        # neighbors.zarr), so the same unchanged array lives at a different artifact-relative path
+        # in parent and child; a path match would never fire. Index the parent by digest, restricted
+        # to sizes the child has so a parent file that cannot match is never read.
+        child_sizes = {item.stat().st_size for item in child_files}
+        parent_by_digest: dict[str, Path] = {}
+        for parent_file in parent_root.rglob("*"):
+            try:
+                if not parent_file.is_file() or parent_file.is_symlink():
+                    continue
+                if parent_file.stat().st_size not in child_sizes:
+                    continue
+                parent_by_digest.setdefault(_file_digest(parent_file), parent_file)
+            except OSError:
+                continue
+
         linked = 0
         reclaimed = 0
-        for new_file in sorted(new_root.rglob("*")):
-            if not new_file.is_file() or new_file.is_symlink():
-                continue
-            parent_file = parent_root / new_file.relative_to(new_root)
-            if not parent_file.is_file() or parent_file.is_symlink():
-                continue
+        for new_file in child_files:
             link_tmp: Path | None = None
             try:
                 new_stat = new_file.stat()
-                parent_stat = parent_file.stat()
-                if (new_stat.st_dev, new_stat.st_ino) == (parent_stat.st_dev, parent_stat.st_ino):
-                    continue  # already one inode
-                if new_stat.st_dev != parent_stat.st_dev or new_stat.st_size != parent_stat.st_size:
-                    continue  # cross-device (cannot link) or different size (cannot match)
-                if not filecmp.cmp(new_file, parent_file, shallow=False):
+                match_file = parent_by_digest.get(_file_digest(new_file))
+                if match_file is None:
                     continue
+                match_stat = match_file.stat()
+                if (new_stat.st_dev, new_stat.st_ino) == (match_stat.st_dev, match_stat.st_ino):
+                    continue  # already one inode
+                if new_stat.st_dev != match_stat.st_dev:
+                    continue  # cross-device: cannot hard-link
+                if not filecmp.cmp(new_file, match_file, shallow=False):
+                    continue  # digest-collision guard
                 link_tmp = new_file.with_name(f".{new_file.name}.dedup-{uuid4().hex}")
-                os.link(parent_file, link_tmp)
+                os.link(match_file, link_tmp)
                 os.replace(link_tmp, new_file)  # atomic swap; frees the new file's own inode
                 linked += 1
                 reclaimed += new_stat.st_size

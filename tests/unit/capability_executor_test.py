@@ -235,11 +235,13 @@ def test_dedup_hard_links_only_byte_identical_files(tmp_path: Path) -> None:
     executor = CapabilityExecutor(session)
     parent = executor.artifact_root / "P"
     child = executor.artifact_root / "C"
-    (parent / "X").mkdir(parents=True)
-    (child / "X").mkdir(parents=True)
+    # Different store-dir names (pca.zarr vs neighbors.zarr) with identical inner files: content
+    # matching must dedup these; path matching (the earlier bug) would miss them entirely.
+    (parent / "pca.zarr" / "X").mkdir(parents=True)
+    (child / "neighbors.zarr" / "X").mkdir(parents=True)
     chunk = b"chunk" * 100
-    (parent / "X" / "0.0").write_bytes(chunk)  # identical to child -> linked
-    (child / "X" / "0.0").write_bytes(chunk)
+    (parent / "pca.zarr" / "X" / "0.0").write_bytes(chunk)  # identical to child -> linked
+    (child / "neighbors.zarr" / "X" / "0.0").write_bytes(chunk)
     (parent / "same").write_bytes(b"abc")  # identical -> linked
     (child / "same").write_bytes(b"abc")
     (parent / "diff").write_bytes(b"aaa")  # differs -> left as its own copy
@@ -248,13 +250,15 @@ def test_dedup_hard_links_only_byte_identical_files(tmp_path: Path) -> None:
 
     linked, freed = executor._dedup_against_parent("C", "P")
 
+    child_chunk = child / "neighbors.zarr" / "X" / "0.0"
+    parent_chunk = parent / "pca.zarr" / "X" / "0.0"
     assert linked == 2
     assert freed == len(chunk) + len(b"abc")
-    assert (child / "X" / "0.0").stat().st_ino == (parent / "X" / "0.0").stat().st_ino
+    assert child_chunk.stat().st_ino == parent_chunk.stat().st_ino  # linked across store names
     assert (child / "same").stat().st_ino == (parent / "same").stat().st_ino
     assert (child / "diff").stat().st_ino != (parent / "diff").stat().st_ino
     assert (child / "diff").read_bytes() == b"bbb"  # differing file untouched
-    assert (child / "X" / "0.0").read_bytes() == chunk  # linked content intact
+    assert child_chunk.read_bytes() == chunk  # linked content intact
     # idempotent, and a missing parent is a no-op
     assert executor._dedup_against_parent("C", "P") == (0, 0)
     assert executor._dedup_against_parent("C", None) == (0, 0)
