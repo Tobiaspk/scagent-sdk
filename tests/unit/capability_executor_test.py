@@ -7,6 +7,7 @@ from pathlib import Path
 
 from scagent_sdk.capabilities.executor import CapabilityExecutor
 from scagent_sdk.capabilities.registry import CapabilityRegistry
+from scagent_sdk.capabilities.results import capability_artifact_directory_name
 from scagent_sdk.session import AnalysisSession
 
 
@@ -31,7 +32,8 @@ def test_capability_result_is_staged_then_committed_by_hook(tmp_path: Path) -> N
     execution_id = envelope["scagent_execution_id"]
     assert envelope["status"] == "validated"
     assert envelope["state_commit"] == "PostToolUse"
-    assert envelope["artifact_relative_path"] == f"artifacts/capabilities/{execution_id}"
+    expected_dir = capability_artifact_directory_name(tool.name, execution_id)
+    assert envelope["artifact_relative_path"] == f"artifacts/capabilities/{expected_dir}"
     assert envelope["artifact_path"] == str(
         (session.directory / envelope["artifact_relative_path"]).resolve()
     )

@@ -26,6 +26,7 @@ from scagent_sdk.capabilities.results import (
     MODEL_MEDIA_TOTAL_BYTES,
     CapabilityContext,
     CapabilityResult,
+    capability_artifact_directory_name,
 )
 from scagent_sdk.contracts.state import SessionState
 from scagent_sdk.errors import CapabilityExecutionError, CapabilityInterrupted
@@ -664,9 +665,17 @@ class CapabilityExecutor:
                     "a read-only tool returned node-scoped facts before an analysis version "
                     "existed, so there is no lineage node to attach them to"
                 )
+        # The committed artifact directory is named for the action, not just its UUID, so a session
+        # tree reads legibly. The name is decided here, recorded in result.json, and honored at
+        # commit, so the model-facing paths and the eventual on-disk location always agree.
+        artifact_relative_path = (
+            "artifacts/capabilities/"
+            + capability_artifact_directory_name(tool.name, context.execution_id)
+        )
         persisted = {
             "schema_version": result.schema_version,
             "execution_id": context.execution_id,
+            "artifact_relative_path": artifact_relative_path,
             "lineage": dispatch_lineage,
             "skill_id": package.manifest.skill_id,
             "skill_version": package.manifest.version,
@@ -706,7 +715,6 @@ class CapabilityExecutor:
                 "lineage": dispatch_lineage,
             },
         )
-        artifact_relative_path = f"artifacts/capabilities/{context.execution_id}"
         artifact_path = (self.session.directory / artifact_relative_path).resolve()
         model_files = [
             {
@@ -922,14 +930,47 @@ class CapabilityExecutor:
 
     def commit(self, execution_id: str) -> bool:
         pending = self.pending_root / execution_id
-        final = self.artifact_root / execution_id
         if execution_id in self.session.store.state.artifacts:
             return False
-        source = pending if pending.is_dir() else final
+        # Normal path: the staging tree is still under pending/<id>. Recovery path: a prior attempt
+        # already moved it into the artifact root, where it carries its descriptive name; find it by
+        # the ID preserved as the directory's suffix (or the whole name, pre-naming).
+        source = pending
+        if not source.is_dir():
+            matches = [
+                item
+                for item in (self.artifact_root.iterdir() if self.artifact_root.exists() else [])
+                if item.is_dir()
+                and (item.name == execution_id or item.name.endswith(f"--{execution_id}"))
+                and (item / "result.json").is_file()
+            ]
+            if len(matches) != 1:
+                raise CapabilityExecutionError(
+                    f"pending capability result not found: {execution_id}"
+                )
+            source = matches[0]
         result_path = source / "result.json"
         if not result_path.is_file():
             raise CapabilityExecutionError(f"pending capability result not found: {execution_id}")
         data = json.loads(result_path.read_text(encoding="utf-8"))
+        if source is not pending:
+            # Recovery: the tree is already in the artifact root; that location is authoritative.
+            final = source
+        else:
+            # Normal: the staging step chose the descriptive directory name and recorded it; honor
+            # it so the paths already handed to the model resolve. Validate it stays directly under
+            # the artifact root and still carries this execution ID; fall back to the legacy name.
+            recorded_relative = data.get("artifact_relative_path")
+            if isinstance(recorded_relative, str) and recorded_relative:
+                final = self.session.directory / recorded_relative
+                if final.parent != self.artifact_root or not (
+                    final.name == execution_id or final.name.endswith(f"--{execution_id}")
+                ):
+                    raise CapabilityExecutionError(
+                        f"unsafe capability artifact directory: {recorded_relative}"
+                    )
+            else:
+                final = self.artifact_root / execution_id
         artifact_relative = str(final.relative_to(self.session.directory))
         artifact_record = {
             "kind": "capability-result",
@@ -985,6 +1026,30 @@ class CapabilityExecutor:
         self.session.refresh_outputs_best_effort()
         return True
 
+    def _committed_artifact_dir(self, execution_id: str) -> Path | None:
+        """Resolve a committed execution's on-disk directory.
+
+        The directory is named ``<action>--<execution_id>``, so it can no longer be reconstructed
+        from the ID alone. Prefer the path recorded on the artifact record (authoritative); fall
+        back to scanning the artifact root for the ID as the whole name (legacy) or the ``--<id>``
+        suffix. Returns ``None`` when no single directory matches.
+        """
+
+        record = self.session.store.state.artifacts.get(execution_id)
+        if isinstance(record, Mapping):
+            recorded = record.get("path")
+            if isinstance(recorded, str) and recorded:
+                candidate = self.session.directory / recorded
+                if candidate.is_dir():
+                    return candidate
+        matches = [
+            item
+            for item in (self.artifact_root.iterdir() if self.artifact_root.exists() else [])
+            if item.is_dir()
+            and (item.name == execution_id or item.name.endswith(f"--{execution_id}"))
+        ]
+        return matches[0] if len(matches) == 1 else None
+
     def _dedup_against_parent(self, execution_id: str, parent_execution_id: Any) -> tuple[int, int]:
         """Hard-link a committed artifact's files to byte-identical files in its lineage parent.
 
@@ -1000,9 +1065,9 @@ class CapabilityExecutor:
 
         if not isinstance(parent_execution_id, str) or not parent_execution_id:
             return (0, 0)
-        new_root = self.artifact_root / execution_id
-        parent_root = self.artifact_root / parent_execution_id
-        if not new_root.is_dir() or not parent_root.is_dir():
+        new_root = self._committed_artifact_dir(execution_id)
+        parent_root = self._committed_artifact_dir(parent_execution_id)
+        if new_root is None or parent_root is None:
             return (0, 0)
         linked = 0
         reclaimed = 0

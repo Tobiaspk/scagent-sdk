@@ -1,8 +1,33 @@
 # Current project state
 
-Status date: 2026-07-29  
+Status date: 2026-08-06  
 Authority: this is the concise source of truth for what exists now, what was actually verified,
 and what should happen next. Historical detail remains in `docs/handoff.md`.
+
+## Committed capability directories are named for their action (2026-08-06)
+
+A committed capability artifact directory is now `artifacts/capabilities/<action>--<execution_id>`
+(e.g. `cluster-single-cells--<uuid>`) instead of a bare UUID, so a session tree reads as what each
+step did. `capability_artifact_directory_name(tool_name, execution_id)` in
+`capabilities/results.py` owns the format: the tool name is reduced to lowercase alphanumerics with
+other characters collapsed to `-`, and the execution ID is kept verbatim as the `--<id>` suffix so
+it stays recoverable and every ID-based lookup still matches. The name is chosen once at staging,
+recorded in `result.json` as `artifact_relative_path`, and honored at commit.
+
+The execution ID itself is unchanged (still a bare UUID in `result.json`, events, and lineage
+nodes); only the directory name gained the prefix. Staging (`runtime/capabilities/pending/<id>`) and
+quarantine stay bare — they are ephemeral and never shown to the model. Every consumer that used to
+reconstruct `capabilities/<id>` now resolves from the recorded artifact/`head_path` and tolerates
+both forms (`== id` or `endswith("--" + id)`): `executor.commit`, `_dedup_against_parent` (via
+`_committed_artifact_dir`), `retention.propose_prune` (via a local `artifact_directory`), and the
+lineage impersonation guard `_historical_node_for_path`. Pre-existing bare-named sessions keep
+working through those fallbacks; there is no rename migration, so already-committed sessions (e.g.
+`run_20260806T192619Z_c48550`) stay bare while all new commits are descriptive.
+
+This ports naming work that previously lived only on `feat/on-request-package-installs` (commit
+`4c69083`) — just the naming pieces, not that branch's unrelated package-install/query-state work.
+Verified: 655 tests pass, ruff/mypy clean, `capability validate` passes, and a live executor run of
+`inspect_dataset` commits `inspect-dataset--<uuid>` on disk.
 
 ## `materialize_count_matrix` cost halved (2026-07-29)
 

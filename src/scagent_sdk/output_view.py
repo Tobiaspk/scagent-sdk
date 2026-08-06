@@ -1,6 +1,6 @@
 """Human-browsable projection of committed scientific-session artifacts.
 
-Capability artifacts remain authoritative under ``artifacts/capabilities/<execution-id>``.
+Capability artifacts remain authoritative under ``artifacts/capabilities/<action>--<execution-id>``.
 This module builds a disposable review surface from those records using relative symlinks, so
 large scientific files are never copied merely to make a session easier to navigate.
 

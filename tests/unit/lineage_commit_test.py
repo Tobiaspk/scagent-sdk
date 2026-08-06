@@ -16,6 +16,7 @@ import pytest
 
 from scagent_sdk.capabilities.executor import CapabilityExecutor
 from scagent_sdk.capabilities.registry import CapabilityRegistry
+from scagent_sdk.capabilities.results import capability_artifact_directory_name
 from scagent_sdk.errors import CapabilityExecutionError
 from scagent_sdk.session import AnalysisSession
 from scagent_sdk.state.lineage import (
@@ -138,13 +139,17 @@ class _Harness:
         return execution_id
 
     def matrix_path(self, execution_id: str) -> str:
-        return str(
-            self.session.directory
-            / "artifacts"
-            / "capabilities"
-            / execution_id
-            / "matrix.h5ad"
+        # The committed directory is named ``<action>--<id>``. Prefer the recorded path; before a
+        # commit exists (recovery-ordering tests stage without committing), compute the same name
+        # the executor would -- matrix_path only ever names ``make_matrix`` outputs here.
+        record = self.session.store.state.artifacts.get(execution_id)
+        directory = (
+            record["path"]
+            if isinstance(record, dict) and record.get("path")
+            else "artifacts/capabilities/"
+            + capability_artifact_directory_name("make_matrix", execution_id)
         )
+        return str(self.session.directory / directory / "matrix.h5ad")
 
     @property
     def lineage(self) -> dict[str, Any]:
@@ -166,9 +171,10 @@ def test_first_matrix_creates_a_root_node_and_becomes_the_head(tmp_path: Path) -
     assert active_head(harness.lineage) == first
     # Optional fields are omitted rather than stored as null: a merge patch deletes null keys.
     assert node.get("parent_execution_id") is None
-    assert node["head_path"] == f"artifacts/capabilities/{first}/matrix.h5ad"
+    first_dir = capability_artifact_directory_name("make_matrix", first)
+    assert node["head_path"] == f"artifacts/capabilities/{first_dir}/matrix.h5ad"
     assert node["identity_signature"].startswith("identity:v1:sha256:")
-    prepared = f"artifacts/capabilities/{first}/matrix.h5ad"
+    prepared = f"artifacts/capabilities/{first_dir}/matrix.h5ad"
     assert harness.facts["analysis"]["dataset_revision"]["prepared_path"] == prepared
     assert resolve_node_facts(harness.lineage, first, merge=apply_merge_patch)["analysis"][
         "dataset_revision"

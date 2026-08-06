@@ -25,6 +25,24 @@ MODEL_MEDIA_TOTAL_BYTES = 8 * 1024 * 1024
 MODEL_IMAGE_TYPES = frozenset({"image/png", "image/jpeg", "image/webp", "image/gif"})
 
 
+def capability_artifact_directory_name(tool_name: str, execution_id: str) -> str:
+    """Stable, readable canonical directory name for one capability execution.
+
+    The committed artifact directory is named ``<action>--<execution_id>`` so a session tree reads
+    as what each step did rather than as a wall of UUIDs. The execution ID is kept verbatim as the
+    suffix, so it remains recoverable from the directory name and every ``endswith("--<id>")`` check
+    that resolves an artifact by ID still matches. ``action`` is the tool name reduced to lowercase
+    alphanumerics with runs of other characters collapsed to a single ``-``.
+    """
+
+    action = "".join(
+        character if character.isalnum() else "-"
+        for character in tool_name.casefold()
+    )
+    action = "-".join(part for part in action.split("-") if part)
+    return f"{action or 'capability'}--{execution_id}"
+
+
 @dataclass(frozen=True)
 class CapabilityContext:
     scientific_session_id: str

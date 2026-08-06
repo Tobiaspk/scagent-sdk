@@ -15,6 +15,7 @@ import pytest
 
 from scagent_sdk.capabilities.executor import CapabilityExecutor
 from scagent_sdk.capabilities.registry import CapabilityRegistry
+from scagent_sdk.capabilities.results import capability_artifact_directory_name
 from scagent_sdk.errors import CapabilityExecutionError
 from scagent_sdk.session import AnalysisSession
 from scagent_sdk.state.lineage import (
@@ -141,9 +142,10 @@ class _Harness:
         return execution_id
 
     def matrix_path(self, execution_id: str) -> str:
-        return str(
-            self.session.directory / "artifacts" / "capabilities" / execution_id / "matrix.h5ad"
-        )
+        # The committed directory is named ``<action>--<id>``; read its recorded path rather than
+        # reconstructing it from the ID.
+        record = self.session.store.state.artifacts[execution_id]
+        return str(self.session.directory / record["path"] / "matrix.h5ad")
 
     @property
     def lineage(self) -> dict[str, Any]:
@@ -344,8 +346,9 @@ def test_switching_moves_the_head_and_the_facts_together(tmp_path: Path) -> None
 
     assert active_head(harness.lineage) == branch
     assert harness.facts["analysis"]["clustering"]["id"] == "clust:alt"
+    branch_dir = capability_artifact_directory_name("make_matrix", branch)
     assert harness.facts["analysis"]["dataset_revision"]["prepared_path"] == (
-        f"artifacts/capabilities/{branch}/matrix.h5ad"
+        f"artifacts/capabilities/{branch_dir}/matrix.h5ad"
     )
     assert harness.facts["cluster_qc"] == {"status": "alt-evidence"}
     # Global facts equal the newly active version's resolved view.
