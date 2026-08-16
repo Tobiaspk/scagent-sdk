@@ -1191,10 +1191,16 @@ def _render_umap(
         )
         if column in adata.obs
     )
-    sc.pl.umap(adata, color=colors, ncols=3, show=False)
+    axes = sc.pl.umap(adata, color=colors, ncols=3, show=False)
+    # Rasterize the per-cell point clouds (as the cluster grid below already does): a vector
+    # scatter of tens of thousands of cells across several panels produces a PNG that overruns
+    # the executor's 2 MiB per-figure model_media cap and discards the whole result.
+    for axis in axes if isinstance(axes, list) else [axes]:
+        for collection in getattr(axis, "collections", []):
+            collection.set_rasterized(True)
     relative = f"{output_prefix}/cluster-qc-umap.png"
     (context.staging_dir / output_prefix).mkdir(parents=True, exist_ok=True)
-    plt.savefig(context.staging_dir / relative, dpi=160, bbox_inches="tight")
+    plt.savefig(context.staging_dir / relative, dpi=120, bbox_inches="tight")
     plt.close("all")
     media = [
         {
