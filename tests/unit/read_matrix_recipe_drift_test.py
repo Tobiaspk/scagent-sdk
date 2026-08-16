@@ -58,6 +58,24 @@ def test_matrix_reading_skills_accept_directory_stores_not_only_files() -> None:
     assert not offenders, f"matrix-reading skills reject .zarr directory inputs: {offenders}"
 
 
+def test_zarr_writer_skills_do_not_declare_an_h5ad_matrix_artifact() -> None:
+    # A skill that writes a .zarr store must declare that store as its artifact, not a stale .h5ad
+    # path -- otherwise the executor looks for a file that was never written ("declared artifact
+    # does not exist"). Regression for scvi-integration, where the write flipped to .zarr but the
+    # inline relative_path literal stayed .h5ad. finalize/convert legitimately write .h5ad and
+    # never call _write_matrix with a .zarr path, so they are not caught here.
+    offenders = []
+    for p in SKILLS.glob("*/scripts/*.py"):
+        text = p.read_text(encoding="utf-8")
+        writes_zarr_store = "_write_matrix(" in text and '.zarr")' in text
+        declares_h5ad = any(
+            '"relative_path":' in line and '.h5ad"' in line for line in text.splitlines()
+        )
+        if writes_zarr_store and declares_h5ad:
+            offenders.append(str(p))
+    assert not offenders, f"skills write .zarr but declare a .h5ad matrix artifact: {offenders}"
+
+
 def test_write_matrix_helper_is_byte_identical_across_skills() -> None:
     holders = sorted(
         p

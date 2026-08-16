@@ -129,7 +129,7 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
         "artifacts": [
             {
                 "name": "scvi-latent-anndata",
-                "relative_path": "scvi-latent.h5ad",
+                "relative_path": "scvi-latent.zarr",
                 "media_type": "application/vnd.zarr",
             },
             {
