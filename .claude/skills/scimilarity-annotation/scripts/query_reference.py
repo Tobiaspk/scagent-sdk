@@ -653,7 +653,7 @@ def query(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     from scipy.sparse import csr_matrix
 
     path = Path(str(arguments["path"])).expanduser().resolve()
-    if not path.is_file():
+    if not path.exists():
         raise FileNotFoundError(path)
     organism = declared_organism(arguments)
     model_path = resolve_model(arguments, require_cellsearch=True)

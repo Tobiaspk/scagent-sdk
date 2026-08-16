@@ -539,7 +539,7 @@ def run_evidence(arguments: dict[str, Any], context: Any) -> dict[str, Any]:  # 
         "random_seed": seed,
     }
 
-    if not path.is_file():
+    if not path.exists():
         raise FileNotFoundError(path)
     adata = _read_matrix(path)
     if cluster_key not in adata.obs:

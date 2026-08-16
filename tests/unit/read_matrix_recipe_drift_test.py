@@ -44,6 +44,20 @@ def test_read_matrix_helper_is_byte_identical_across_skills() -> None:
     assert not drifted, f"_read_matrix drifted from canonical form in: {drifted}"
 
 
+def test_matrix_reading_skills_accept_directory_stores_not_only_files() -> None:
+    # A .zarr artifact is a directory, so a skill that reads a matrix must guard its input with
+    # path.exists(), never path.is_file() (which is False for a store and raises FileNotFoundError
+    # before the read). Regression for the run where read-only skills (visualize, batch) crashed on
+    # a .zarr input because their guards were never relaxed alongside the writer flip.
+    offenders = [
+        str(p)
+        for p in SKILLS.glob("*/scripts/*.py")
+        if "_read_matrix" in (text := p.read_text(encoding="utf-8"))
+        and "if not path.is_file()" in text
+    ]
+    assert not offenders, f"matrix-reading skills reject .zarr directory inputs: {offenders}"
+
+
 def test_write_matrix_helper_is_byte_identical_across_skills() -> None:
     holders = sorted(
         p

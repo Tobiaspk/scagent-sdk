@@ -373,7 +373,7 @@ def is_mito(symbol: str) -> bool:
 def _load(arguments: dict[str, Any]) -> tuple[Path, Any]:
 
     path = Path(str(arguments["path"])).expanduser().resolve()
-    if not path.is_file():
+    if not path.exists():
         raise FileNotFoundError(path)
     return path, _read_matrix(path)
 
