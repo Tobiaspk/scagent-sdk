@@ -331,9 +331,19 @@ def _safe_group(value: str) -> str:
 
 def _dataset_fingerprint(path: Path) -> str:
     digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
+    # A .zarr artifact is a store directory (ADR 0011): hash each member by its in-store path and
+    # content rather than open() the directory (which raises IsADirectoryError). A plain file hashes
+    # exactly as before.
+    if path.is_dir():
+        members = sorted(item for item in path.rglob("*") if item.is_file())
+    else:
+        members = [path]
+    for member in members:
+        if path.is_dir():
+            digest.update(f"{member.relative_to(path).as_posix()}\0".encode())
+        with member.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
     return f"sha256:{digest.hexdigest()}"
 
 
@@ -1396,9 +1406,9 @@ def _cleanup_facts_patch(
             "fingerprint": fingerprint,
             "fingerprint_mode": "full",
             "format": {
-                "extension": "h5ad",
-                "suffixes": [".h5ad"],
-                "byte_signature": "hdf5",
+                "extension": "zarr",
+                "suffixes": [".zarr"],
+                "byte_signature": "zarr",
                 "extension_signature_consistent": True,
             },
             "lineage": {

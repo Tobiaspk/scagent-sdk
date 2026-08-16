@@ -33,8 +33,19 @@ def _identity(kind: str, value: Any) -> str:
 
 
 def _dataset_fingerprint(path: Path) -> str:
-    size = path.stat().st_size
     digest = hashlib.sha256()
+    if path.is_dir():
+        # A .zarr artifact is a store directory (ADR 0011): fingerprint every member file by its
+        # in-store path and content, deterministically, rather than open() the directory (which
+        # raises IsADirectoryError).
+        digest.update(b"scagent-dataset-v1-store\0")
+        for member in sorted(item for item in path.rglob("*") if item.is_file()):
+            digest.update(f"{member.relative_to(path).as_posix()}\0{member.stat().st_size}\0".encode())
+            with member.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(SAMPLE_BYTES), b""):
+                    digest.update(chunk)
+        return f"sha256:{digest.hexdigest()}"
+    size = path.stat().st_size
     digest.update(f"scagent-dataset-v1\0{size}\0".encode())
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(SAMPLE_BYTES), b""):
@@ -736,9 +747,9 @@ def _execute_review(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
                 "fingerprint": output_fingerprint,
                 "fingerprint_mode": "full",
                 "format": {
-                    "extension": "h5ad",
-                    "suffixes": [".h5ad"],
-                    "byte_signature": "hdf5",
+                    "extension": "zarr",
+                    "suffixes": [".zarr"],
+                    "byte_signature": "zarr",
                     "extension_signature_consistent": True,
                 },
                 "lineage": {

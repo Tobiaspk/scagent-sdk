@@ -196,6 +196,7 @@ tools:
     description: write a zarr-like store directory
     entrypoint: scripts/run.py:run
     input_schema: {type: object}
+    primary_matrix_output: matrix
 """,
         encoding="utf-8",
     )

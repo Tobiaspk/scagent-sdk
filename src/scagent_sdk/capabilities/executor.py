@@ -60,7 +60,9 @@ _EXCEPTION_LINE = re.compile(r"^[A-Za-z_][\w.]*(?:Error|Exception|Warning):\s+(.
 # execution has ever produced more than one ``.h5ad`` (0 of 61). Both become declared fields --
 # ``primary_matrix_input``/``primary_matrix_output`` -- in the spec's D5; until then a second
 # matrix output raises rather than being guessed at.
-_MATRIX_SUFFIX = ".h5ad"
+# A matrix artifact is an .h5ad file or a .zarr store; the stray-output check must catch either, or
+# an undeclared matrix silently detaches from lineage.
+_MATRIX_SUFFIX = (".h5ad", ".zarr")
 # Executor-owned control argument. Declared in the schemas of tools that can transform the dataset
 # so the model may pass it, but removed before dispatch: branching is a lineage concern and no skill
 # should have to know the forest exists.
