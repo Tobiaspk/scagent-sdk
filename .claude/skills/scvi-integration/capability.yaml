@@ -18,7 +18,7 @@ tools:
         batch_key: {type: string}
         n_latent: {type: integer, minimum: 2, maximum: 100, default: 30}
         n_layers: {type: integer, minimum: 1, maximum: 5, default: 2}
-        max_epochs: {type: integer, minimum: 1, default: 200}
+        max_epochs: {type: integer, minimum: 1, description: "Training epoch cap. Omit to let scVI's cell-count heuristic choose it (fewer epochs for larger datasets); pass a value only to override. Early stopping applies either way."}
         random_seed: {type: integer, default: 0}
       required: [batch_key]
       additionalProperties: false
