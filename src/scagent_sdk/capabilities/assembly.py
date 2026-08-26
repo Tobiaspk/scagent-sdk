@@ -148,7 +148,14 @@ class CapabilityAssembler:
                 skill_id=package.manifest.skill_id,
             )
             self.observer.on_tool_started(activity)
-            response = await self.executor.execute(package, tool, arguments)
+
+            def _progress(text: str) -> None:
+                # Called from the compute worker thread; the observer only stores the string.
+                self.observer.on_tool_progress(activity, text)
+
+            response = await self.executor.execute(
+                package, tool, arguments, progress=_progress
+            )
             if response.get("is_error"):
                 # The full detail stays in the tool result the model receives; the terminal only
                 # needs the concise one-line summary.

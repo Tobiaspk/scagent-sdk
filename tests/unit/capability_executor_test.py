@@ -307,3 +307,34 @@ tools:
     assert mirrored[0].name.startswith("inspect-the-reyfman-dataset-")
     assert mirrored[0].is_symlink()
     assert mirrored[0].read_text() == "print(1)\n"
+
+
+def test_bounded_model_image_downscales_oversized_figures_instead_of_failing() -> None:
+    """Regression: an over-budget figure must be downscaled to fit, not discarded. Previously the
+    executor raised "model_media exceeds ... bytes" and threw away the whole capability result."""
+
+    import io
+
+    from PIL import Image
+
+    from scagent_sdk.capabilities.executor import _bounded_model_image
+
+    # A small PNG passes through untouched.
+    tiny = io.BytesIO()
+    Image.new("RGB", (8, 8), "white").save(tiny, format="PNG")
+    data, mime = _bounded_model_image(tiny.getvalue(), "image/png", 2 * 1024 * 1024)
+    assert data == tiny.getvalue()
+    assert mime == "image/png"
+
+    # A high-entropy PNG well over a tight budget is re-encoded under it.
+    import random
+
+    rng = random.Random(0)
+    noise = bytes(rng.getrandbits(8) for _ in range(3 * 2000 * 2000))
+    big = io.BytesIO()
+    Image.frombytes("RGB", (2000, 2000), noise).save(big, format="PNG")
+    limit = 256 * 1024
+    assert big.tell() > limit
+    bounded, bmime = _bounded_model_image(big.getvalue(), "image/png", limit)
+    assert len(bounded) <= limit
+    assert bmime in {"image/png", "image/jpeg"}

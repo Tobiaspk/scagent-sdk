@@ -1,11 +1,11 @@
 schema_version: 1
 skill:
   id: single-cell-clustering
-  version: "0.1.0"
+  version: "0.2.0"
   description: Independent Leiden clustering and group-wise gene ranking.
 tools:
   - name: cluster_single_cells
-    description: Run Leiden on an existing named neighbor graph and save labels under an explicit observation key.
+    description: Run GPU Leiden with RAPIDS SingleCell on an existing named neighbor graph and save labels under an explicit observation key.
     entrypoint: scripts/clustering.py:cluster_cells
     environment: gpu-singlecell
     activity_label: Clustering cells

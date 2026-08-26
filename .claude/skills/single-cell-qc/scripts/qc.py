@@ -487,7 +487,7 @@ def calculate_qc(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     )
     adata.uns["scagent_sdk"] = metadata
     output_name = "qc-assessed.zarr"
-    final_path = f"artifacts/capabilities/{context.execution_id}/{output_name}"
+    final_path = f"{context.artifact_relative_path}/{output_name}"
     report = {
         "operation": "calculate_only",
         "organism": organism,
@@ -519,7 +519,7 @@ def calculate_qc(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     artifacts.extend(figures)
     provenance = dict(adata.uns.get("scagent_sdk", {}))
     required_visual_artifacts = [
-        f"artifacts/capabilities/{context.execution_id}/{item['relative_path']}"
+        f"{context.artifact_relative_path}/{item['relative_path']}"
         for item in figures
     ]
     return {
@@ -539,6 +539,7 @@ def calculate_qc(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
                 "count_representation_id": provenance.get("count_representation_id"),
                 "review_status": "pending",
                 "required_visual_artifacts": required_visual_artifacts,
+                "shown_visual_artifacts": required_visual_artifacts,
             }
         },
         "artifacts": artifacts,
@@ -558,6 +559,7 @@ def review_qc(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     if not rationale:
         raise ValueError("rationale must not be empty")
     reviewed = {str(value) for value in arguments.get("reviewed_artifacts", [])}
+    reviewed.update(str(value) for value in evidence.get("shown_visual_artifacts", []))
     required = {str(value) for value in evidence.get("required_visual_artifacts", [])}
     missing = sorted(required - reviewed)
     if missing:

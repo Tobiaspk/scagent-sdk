@@ -41,6 +41,25 @@ def test_preprocessing_operations_are_separate_and_ungated() -> None:
     assert "prepare-single-cell" not in packages
 
 
+def test_core_single_cell_transformations_declare_rapids_gpu_backend() -> None:
+    root = Path(__file__).parents[2] / ".claude" / "skills"
+    sources = [
+        root / "expression-preprocessing/scripts/preprocess.py",
+        root / "dimensionality-reduction/scripts/reduce.py",
+        root / "single-cell-clustering/scripts/clustering.py",
+    ]
+    for source in sources:
+        text = source.read_text(encoding="utf-8")
+        assert "rapids_singlecell" in text
+        assert '"compute_backend": "rapids_singlecell"' in text
+    assert "rsc.pp.normalize_total" in sources[0].read_text(encoding="utf-8")
+    reduction = sources[1].read_text(encoding="utf-8")
+    assert "rsc.pp.pca" in reduction
+    assert "rsc.pp.neighbors" in reduction
+    assert "rsc.tl.umap" in reduction
+    assert "rsc.tl.leiden" in sources[2].read_text(encoding="utf-8")
+
+
 def test_reference_inference_does_not_require_clustering_or_qc() -> None:
     packages = _packages()
     scimilarity = {
@@ -55,6 +74,8 @@ def test_reference_inference_does_not_require_clustering_or_qc() -> None:
     assert celltypist_run.floors == ()
     assert "cluster_key" not in scimilarity_run.input_schema["properties"]
     assert "cluster_key" not in celltypist_run.input_schema["properties"]
+    assert set(celltypist_run.input_schema["required"]) == {"model"}
+    assert "default" not in celltypist_run.input_schema["properties"]["model"]
     # Both consume the analysis matrix and produce a new one, declared so the executor can resolve
     # an omitted path to the active artifact and chain them without the model naming files.
     for tool, artifact in (
@@ -69,11 +90,11 @@ def test_reference_inference_does_not_require_clustering_or_qc() -> None:
     assert "summarize_celltypist_by_cluster" in celltypist
 
 
-def test_scvi_training_is_representation_only_and_ungated() -> None:
+def test_scvi_training_is_representation_only_and_requires_integrate_choice() -> None:
     package = _packages()["scvi-integration"]
     tool = package.manifest.tools[0]  # type: ignore[union-attr]
     assert tool.name == "train_scvi_latent"
-    assert tool.floors == ()
+    assert tool.floors == ("integration_authorized",)
     assert "resolution" not in tool.input_schema["properties"]
 
 

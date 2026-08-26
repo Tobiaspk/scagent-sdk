@@ -910,7 +910,7 @@ def query(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
             "search_seconds": search_seconds,
             "inline_view": inline_bounding,
             "full_report_artifact": (
-                f"artifacts/capabilities/{context.execution_id}/{report_name}"
+                f"{context.artifact_relative_path}/{report_name}"
             ),
             "queries": inline_queries,
         },
@@ -932,7 +932,7 @@ def query(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
                         "excluded_studies": sorted(excluded_studies),
                         "queries": summary_rows,
                         "artifact_path": (
-                            f"artifacts/capabilities/{context.execution_id}/{report_name}"
+                            f"{context.artifact_relative_path}/{report_name}"
                         ),
                     }
                 }

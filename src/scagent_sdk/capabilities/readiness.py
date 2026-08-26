@@ -131,13 +131,20 @@ class EnvironmentReadiness:
 
 
 def _gpu_snapshot() -> tuple[int, int | None]:
-    """Visible GPU count and largest free memory in MiB, or (0, None) when unavailable."""
+    """Visible GPU count and largest free memory in MiB, or (0, None) when unavailable.
+
+    Presence is counted from device index rows, independently of memory reporting. Unified-memory
+    parts such as the GB10 report ``memory.free`` as ``[N/A]`` even though the device is present and
+    usable, so inferring presence from parseable free-memory would wrongly count zero GPUs. Free
+    memory is parsed opportunistically per row and left as ``None`` when the device does not expose
+    it, which downstream renders as "free memory unknown" rather than blocking the environment.
+    """
 
     try:
         completed = subprocess.run(
             [
                 "nvidia-smi",
-                "--query-gpu=memory.free",
+                "--query-gpu=index,memory.free",
                 "--format=csv,noheader,nounits",
             ],
             capture_output=True,
@@ -149,8 +156,16 @@ def _gpu_snapshot() -> tuple[int, int | None]:
         return 0, None
     if completed.returncode != 0:
         return 0, None
-    free = [int(line) for line in completed.stdout.split() if line.strip().isdigit()]
-    return len(free), max(free) if free else None
+    count = 0
+    free: list[int] = []
+    for line in completed.stdout.splitlines():
+        fields = [field.strip() for field in line.split(",")]
+        if not fields or not fields[0].isdigit():
+            continue
+        count += 1
+        if len(fields) > 1 and fields[1].isdigit():
+            free.append(int(fields[1]))
+    return count, max(free) if free else None
 
 
 def probe_environments(

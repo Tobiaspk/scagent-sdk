@@ -9,6 +9,7 @@ tools:
     entrypoint: scripts/integrate.py:run
     environment: scvi
     activity_label: Training scVI latent model
+    floors: [integration_authorized]
     input_schema:
       type: object
       properties:
@@ -23,3 +24,17 @@ tools:
       additionalProperties: false
     primary_matrix_input: path
     primary_matrix_output: scvi-latent-anndata
+  - name: score_integration
+    description: Score how well an integration mixed batches — per-cell neighborhood batch entropy on the corrected latent (X_scVI) versus the X_pca baseline. Use once after integrating to verify mixing improved; do NOT re-run investigate_batch to check integration. Read-only scoring; writes no matrix.
+    entrypoint: scripts/score.py:run
+    environment: gpu-singlecell
+    activity_label: Scoring integration mixing
+    input_schema:
+      type: object
+      properties:
+        path: {type: string, description: "Integrated H5AD/zarr with obsm['X_scVI'] (and obsm['X_pca'] baseline)."}
+        batch_key: {type: string, description: "Batch column; defaults to the key scVI conditioned on."}
+        use_rep: {type: string, default: X_scVI, description: "Corrected latent to score (never X_umap)."}
+        n_neighbors: {type: integer, minimum: 5, maximum: 200, default: 50}
+      additionalProperties: false
+    primary_matrix_input: path

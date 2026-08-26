@@ -12,8 +12,6 @@
 
 `design_interpretation` (experimental design):
 
-- `documented_technical_batch`: the batch is established as technical by metadata/documentation
-  (`technical_batch_documented=true` with a basis) — never inferred from separation alone.
 - `confounded_with_biology`: the batch is perfectly confounded with a supplied condition column.
 - `orthogonal_but_not_known_technical`: a supplied condition is present and not confounded, but the
   batch is not documented technical.
@@ -26,19 +24,15 @@
 | none / localized | any | do_not_integrate_based_on_current_evidence |
 | recurring | unknown / confounded_with_biology | cannot_determine_technical_vs_biological |
 | recurring | orthogonal_but_not_known_technical | integration_optional_for_confirmed_replicates |
-| recurring | documented_technical_batch | integration_supported |
 
 ## Deciding
 
 - `keep_uncorrected`: effects are modest, biologically entangled, or not harmful to the analysis.
-- `integrate`: justified unwanted variation with adequate cross-batch biological overlap. Requires
-  an `integration_basis` (`documented_technical_batch` or `user_authorized_comparable_replicates`);
-  if the recommendation does not support integration, an explicit `override_warning` is required —
-  integration never proceeds silently against the evidence, and perfect biological confounding is
-  never silently overridden.
+- `integrate`: the user chooses to build a shared corrected representation after weighing the
+  evidence and study goal. Record that choice concisely; do not turn it into a model-written proof.
 - `separate`: batches are incompatible assays, tissues, species, or irreducibly confounded designs.
-- `request_guidance`: design knowledge is insufficient to tell technical from biological.
-- `not_applicable`: no meaningful batch unit is present.
+- If guidance is needed, ask the user and leave the decision unresolved. If no meaningful batch
+  unit is present, `investigate_batch(batch_key=null)` records not-applicable evidence directly.
 
 ## Recurrence is advisory, not replication
 
@@ -51,14 +45,12 @@ with `direct-matched-region-degs.csv` and weigh the detection fractions (`pct_a`
 size, and gene class. Sample-aware pseudobulk contrasts remain the appropriate tool for replicated
 inference and are not implemented here.
 
-## Authorization
+## Durable decision
 
-`integrate` is validated at decision time and the result is persisted (`validated`,
-`decision_policy_version`). A `documented_technical_batch` basis is only accepted when the
-*evidence* was recorded with `technical_batch_documented=true` and a non-empty
-`technical_batch_basis` — the claim cannot be asserted at decision time. Integration remains gated
-by the floor on that validation, a matching evidence id, all four current identities, and an
-explicit `override_warning` whenever the recommendation does not support integration.
+The decision persists only the choice, its short rationale, and the current `evidence_id`. The
+evidence holds the cell-set and count identities used for currency. Integration and reclustering
+are consequences of the decision and do not stale it; changing cells or counts does. The full
+scientific reasoning remains in the evidence artifact rather than being duplicated into state.
 
 Correction cannot recover a biological contrast perfectly confounded with batch. A non-confounded
 condition column alone does not make sample-wide differences technical — donor and other biological

@@ -67,14 +67,30 @@ def list_workspace(arguments: dict[str, Any], _context: Any) -> dict[str, Any]:
 def read_text_file(arguments: dict[str, Any], _context: Any) -> dict[str, Any]:
     path = Path(str(arguments["path"])).expanduser().resolve()
     max_chars = int(arguments.get("max_chars", 20000))
+    offset = int(arguments.get("offset_chars", 0))
+    if offset < 0:
+        raise ValueError("offset_chars must be nonnegative")
     if not path.is_file():
         raise FileNotFoundError(path)
     with path.open("r", encoding="utf-8", errors="replace") as handle:
+        if offset:
+            handle.read(offset)
         text = handle.read(max_chars + 1)
     truncated = len(text) > max_chars
+    chunk = text[:max_chars]
+    next_offset = offset + len(chunk) if truncated else None
     return {
-        "summary": f"Read {min(len(text), max_chars)} characters from {path.name}.",
-        "details": {"path": str(path), "text": text[:max_chars], "truncated": truncated},
+        "summary": (
+            f"Read characters {offset}:{offset + len(chunk)} from {path.name}"
+            + (f"; continue at offset {next_offset}." if next_offset is not None else ".")
+        ),
+        "details": {
+            "path": str(path),
+            "text": chunk,
+            "offset_chars": offset,
+            "next_offset_chars": next_offset,
+            "truncated": truncated,
+        },
     }
 
 
@@ -97,8 +113,11 @@ def run_shell_command(arguments: dict[str, Any], context: Any) -> dict[str, Any]
         raise NotADirectoryError(cwd)
     timeout = int(arguments.get("timeout_seconds", 600))
     started = time.monotonic()
+    # The capability worker already provides the locked scientific environment. Starting a login
+    # shell needlessly reruns Iris profile initialization (~5 seconds per command in the live
+    # environment) and can overwrite that environment. Use a plain shell with explicit pipefail.
     completed = subprocess.run(
-        ["bash", "-lc", command],
+        ["bash", "-c", "set -o pipefail\n" + command],
         cwd=cwd,
         text=True,
         capture_output=True,

@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import subprocess
 import threading
+from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -35,7 +38,7 @@ class EnvironmentBroker:
         self._healthy: set[str] = set()
         self._probe_results: dict[str, dict[str, Any]] = {}
         self._lock = threading.Lock()
-        self._running: dict[str, subprocess.Popen[str]] = {}
+        self._running: dict[str, subprocess.Popen[bytes]] = {}
         self._cancelled: set[str] = set()
 
     @staticmethod
@@ -308,7 +311,7 @@ print(json.dumps({{
         )
 
     @staticmethod
-    def _terminate(process: subprocess.Popen[str]) -> None:
+    def _terminate(process: subprocess.Popen[bytes]) -> None:
         """Signal the worker's whole process group, escalating only if it ignores SIGTERM.
 
         Scientific workers spawn their own children (CUDA contexts, data loaders, BLAS pools);
@@ -337,12 +340,20 @@ print(json.dumps({{
         execution_id: str,
         label: str,
         timeout_seconds: float | None,
+        progress: Callable[[str], None] | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        """Run one capability worker as an interruptible process group.
+        """Run one capability worker as an interruptible process group, streaming its output.
 
         ``subprocess.run`` cannot be stopped from another thread, so a long compute would run
         to completion no matter what the user pressed. Registering the ``Popen`` here lets
         :meth:`cancel` signal it while the event loop stays free to service the interrupt.
+
+        Both pipes are drained live by reader threads instead of a single buffered
+        ``communicate()``: draining as data arrives is what lets a long training run report its
+        own progress (scVI epoch bars, tqdm) through ``progress`` while it is still running, and
+        also prevents a full pipe buffer from stalling the worker. The captured text is still
+        returned intact for logs and error tails. The result envelope travels by file, not stdout,
+        so streaming the pipes never disturbs it.
         """
 
         with self._lock:
@@ -350,28 +361,100 @@ print(json.dumps({{
         process = subprocess.Popen(  # noqa: S603 - command is built from validated profiles
             command,
             env=environment,
-            text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             start_new_session=True,
         )
         with self._lock:
             self._running[execution_id] = process
+
+        out_chunks: list[bytes] = []
+        err_chunks: list[bytes] = []
+        readers = [
+            threading.Thread(
+                target=self._pump_stream,
+                args=(process.stdout, out_chunks, progress),
+                daemon=True,
+            ),
+            threading.Thread(
+                target=self._pump_stream,
+                args=(process.stderr, err_chunks, progress),
+                daemon=True,
+            ),
+        ]
+        for reader in readers:
+            reader.start()
         try:
             try:
-                stdout, stderr = process.communicate(timeout=timeout_seconds)
+                process.wait(timeout=timeout_seconds)
             except subprocess.TimeoutExpired:
                 self._terminate(process)
-                process.communicate()
+                process.wait()
                 raise
         finally:
+            # Join the readers so the pipes are fully drained before we assemble the captured
+            # text; the process has exited (or been killed), so both reads have hit EOF.
+            for reader in readers:
+                reader.join()
             with self._lock:
                 self._running.pop(execution_id, None)
                 cancelled = execution_id in self._cancelled
                 self._cancelled.discard(execution_id)
         if cancelled:
             raise CapabilityInterrupted(f"{label} was stopped by the user")
+        stdout = b"".join(out_chunks).decode("utf-8", errors="replace")
+        stderr = b"".join(err_chunks).decode("utf-8", errors="replace")
         return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+
+    # A worker line worth surfacing as live progress: a tqdm/Lightning bar or an epoch counter.
+    # Kept deliberately narrow so ordinary log chatter never floods the spinner.
+    _PROGRESS_HINT = re.compile(r"Epoch\s+\d|\d+%\|| it/s|\d+/\d+\s*\[")
+    _ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+
+    @classmethod
+    def _pump_stream(
+        cls,
+        stream: Any,
+        chunks: list[bytes],
+        progress: Callable[[str], None] | None,
+    ) -> None:
+        """Drain one worker pipe, capturing every byte and forwarding progress-like fragments.
+
+        Progress bars overwrite in place with carriage returns rather than newlines, so the
+        buffer is split on both ``\\r`` and ``\\n`` to surface intermediate bar updates, not only
+        completed lines. Only fragments that look like a bar/epoch counter are forwarded, and any
+        failure in the callback is swallowed — telemetry must never break the compute.
+        """
+
+        raw = stream.raw if hasattr(stream, "raw") else stream
+        buffer = b""
+        try:
+            while True:
+                data = os.read(raw.fileno(), 65536)
+                if not data:
+                    break
+                chunks.append(data)
+                if progress is None:
+                    continue
+                buffer += data
+                fragments = re.split(rb"[\r\n]", buffer)
+                buffer = fragments.pop()
+                for fragment in fragments:
+                    cls._forward_progress(fragment, progress)
+        except (OSError, ValueError):
+            pass
+        finally:
+            if progress is not None and buffer:
+                cls._forward_progress(buffer, progress)
+            with suppress(Exception):
+                stream.close()
+
+    @classmethod
+    def _forward_progress(cls, fragment: bytes, progress: Callable[[str], None]) -> None:
+        text = cls._ANSI.sub("", fragment.decode("utf-8", errors="replace")).strip()
+        if text and cls._PROGRESS_HINT.search(text):
+            with suppress(Exception):
+                progress(text[:160])
 
     def execute(
         self,
@@ -379,6 +462,8 @@ print(json.dumps({{
         tool: CapabilityTool,
         arguments: dict[str, Any],
         context: CapabilityContext,
+        *,
+        progress: Callable[[str], None] | None = None,
     ) -> EnvironmentExecution:
         profile = self.registry.resolve(tool.environment)
         if profile.name not in self._healthy:
@@ -402,12 +487,16 @@ print(json.dumps({{
                 "state_revision": context.state_revision,
                 "state_facts": context.state_facts,
                 "state_lineage": context.state_lineage,
+                "artifact_relative_path": context.artifact_relative_path,
             },
         }
         input_path.write_text(
             json.dumps(payload, sort_keys=True, allow_nan=False) + "\n", encoding="utf-8"
         )
         environment = profile.build_environment()
+        # Unbuffered worker output so a progress bar reaches the streamed pipes as it is drawn,
+        # rather than sitting in a block buffer until the process exits.
+        environment.setdefault("PYTHONUNBUFFERED", "1")
         pinned_devices: list[int] = []
         if profile.gpu_required:
             probe_result = self._probe_results.get(profile.name, {})
@@ -439,6 +528,7 @@ print(json.dumps({{
                 execution_id=context.execution_id,
                 label=tool.name,
                 timeout_seconds=profile.timeout_seconds,
+                progress=progress,
             )
         except subprocess.TimeoutExpired as exc:
             input_path.unlink(missing_ok=True)

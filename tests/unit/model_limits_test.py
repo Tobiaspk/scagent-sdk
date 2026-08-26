@@ -103,6 +103,35 @@ def test_prefers_limits_published_directly_by_litellm_model_info(tmp_path: Path)
     assert len(transport.requests) == 1
 
 
+def test_advertises_concrete_upstream_model_not_routing_alias(tmp_path: Path) -> None:
+    # When LiteLLM publishes limits directly (early return), advertised_model must still
+    # report the concrete upstream checkpoint from litellm_params.model, not the alias.
+    transport = FakeTransport(
+        {
+            "http://127.0.0.1:4000/model/info": (
+                200,
+                {
+                    "data": [
+                        {
+                            "model_name": "scagent-primary",
+                            "model_info": {"max_input_tokens": 262144},
+                            "litellm_params": {
+                                "model": "openai/Qwen3.8-27B",
+                                "api_base": "http://iscp001:8000/v1",
+                            },
+                        }
+                    ]
+                },
+            )
+        }
+    )
+
+    limits = ModelLimitResolver(_profile(tmp_path), transport=transport).resolve()
+
+    assert limits.source == "litellm:model_info"
+    assert limits.advertised_model == "Qwen3.8-27B"
+
+
 def test_uses_profile_value_only_as_fallback_when_endpoints_do_not_advertise(
     tmp_path: Path,
 ) -> None:

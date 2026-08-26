@@ -64,6 +64,7 @@ def _context(handler: Any, tmp_path: Path, dataset: Path) -> Any:
         staging_dir=staging,
         session_dir=tmp_path / "session",
         execution_id="execution-1",
+        artifact_relative_path="artifacts/capabilities/run-cellbender--execution-1",
         state_facts={"dataset": dataset_fact},
     )
 

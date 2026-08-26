@@ -322,7 +322,7 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
                         "candidates": candidates,
                         "warnings": warnings,
                         "artifact_path": (
-                            f"artifacts/capabilities/{context.execution_id}/marker-candidates.json"
+                            f"{context.artifact_relative_path}/marker-candidates.json"
                         ),
                     }
                 }

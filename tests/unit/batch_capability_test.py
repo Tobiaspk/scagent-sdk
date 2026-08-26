@@ -33,7 +33,7 @@ def _g(name: str) -> Any:
 
 def test_manifest_splits_evidence_and_decision_tools() -> None:
     package = _package()
-    assert package.manifest.version == "0.5.0"
+    assert package.manifest.version == "0.8.0"
     names = {tool.name for tool in package.manifest.tools}
     assert names == {"investigate_batch", "decide_batch_handling"}
     evidence = next(t for t in package.manifest.tools if t.name == "investigate_batch")
@@ -47,11 +47,7 @@ def test_manifest_splits_evidence_and_decision_tools() -> None:
     assert evidence.primary_matrix_input == "path"
     assert evidence.primary_matrix_output is None  # reads a matrix, writes none
     props = evidence.input_schema["properties"]
-    # The misleading diffxpy no-op is gone; Wilcoxon is the declared primary method.
-    assert "prefer_diffxpy" not in props
-    # Cost and match quality are explicitly bounded.
-    assert props["max_candidate_pairs"]["maximum"] == 500
-    assert "min_match_jaccard" in props
+    assert set(props) == {"path", "batch_key", "cluster_key", "condition_keys"}
     # Decision tool consumes an evidence id and is floored on current evidence.
     assert decision.floors == ("current_batch_evidence",)
     assert decision.entrypoint.endswith(":run_decision")
@@ -59,9 +55,8 @@ def test_manifest_splits_evidence_and_decision_tools() -> None:
         "keep_uncorrected",
         "integrate",
         "separate",
-        "request_guidance",
-        "not_applicable",
     }
+    assert set(decision.input_schema["properties"]) == {"evidence_id", "decision", "rationale"}
 
 
 # --- gene-first pure helpers -------------------------------------------------
@@ -136,6 +131,31 @@ def test_recurrence_is_order_invariant_and_needs_two_populations() -> None:
     assert forward[0]["n_populations"] == 2
 
 
+def test_profile_nomination_ranks_cross_sample_identity_before_deg() -> None:
+    nominate = _g("nominate_cross_sample_pairs")
+    keys = [("myeloid-a", "S1"), ("myeloid-b", "S2"), ("lymphoid", "S2")]
+    means = [
+        [8.0, 7.0, 0.0, 0.0],
+        [7.5, 6.5, 0.2, 0.0],
+        [0.0, 0.0, 7.0, 8.0],
+    ]
+    pairs = nominate(keys, means, ["LYZ", "CTSS", "CD3D", "TRAC"], min_corr=0.4)
+    assert pairs[0]["cluster_a"] == "myeloid-a"
+    assert pairs[0]["cluster_b"] == "myeloid-b"
+    assert pairs[0]["profile_correlation"] > 0.9
+
+
+def test_recurrence_ties_rank_by_effect_not_gene_name() -> None:
+    summarize = _g("summarize_recurrence")
+    rows = [
+        {"gene": "ZZZ", "higher_in_batch": "S1", "population": 1, "logfoldchange": 4.0},
+        {"gene": "ZZZ", "higher_in_batch": "S1", "population": 2, "logfoldchange": 3.0},
+        {"gene": "AAA", "higher_in_batch": "S1", "population": 1, "logfoldchange": 1.0},
+        {"gene": "AAA", "higher_in_batch": "S1", "population": 2, "logfoldchange": 1.0},
+    ]
+    assert [row["gene"] for row in summarize(rows)] == ["ZZZ", "AAA"]
+
+
 def test_recurrence_same_gene_opposite_batches_does_not_recur() -> None:
     summarize = _g("summarize_recurrence")
     rows = [
@@ -152,51 +172,29 @@ def test_classify_gene_evidence_axis() -> None:
     assert classify(3, 2) == "recurring_sample_associated"
 
 
-def test_confounding_outranks_documented_technical() -> None:
-    """Perfect biological confounding is never silently reclassified as technical."""
-    classify = _g("classify_design")
-    assert (
-        classify(
-            confounded_columns=["disease"], technical_documented=True, has_orthogonal_condition=True
-        )
-        == "confounded_with_biology"
-    )
-
-
 def test_classify_design_axis_priority() -> None:
     classify = _g("classify_design")
     assert (
-        classify(confounded_columns=[], technical_documented=True, has_orthogonal_condition=True)
-        == "documented_technical_batch"
-    )
-    assert (
         classify(
             confounded_columns=["disease"],
-            technical_documented=False,
             has_orthogonal_condition=False,
         )
         == "confounded_with_biology"
     )
     assert (
-        classify(confounded_columns=[], technical_documented=False, has_orthogonal_condition=True)
+        classify(confounded_columns=[], has_orthogonal_condition=True)
         == "orthogonal_but_not_known_technical"
     )
     assert (
-        classify(confounded_columns=[], technical_documented=False, has_orthogonal_condition=False)
+        classify(confounded_columns=[], has_orthogonal_condition=False)
         == "unknown"
     )
 
 
 def test_recommendation_matrix() -> None:
     recommend = _g("recommend")
-    assert (
-        recommend("none", "documented_technical_batch")
-        == "do_not_integrate_based_on_current_evidence"
-    )
-    assert (
-        recommend("localized", "documented_technical_batch")
-        == "do_not_integrate_based_on_current_evidence"
-    )
+    assert recommend("none", "unknown") == "do_not_integrate_based_on_current_evidence"
+    assert recommend("localized", "unknown") == "do_not_integrate_based_on_current_evidence"
     assert (
         recommend("recurring_sample_associated", "unknown")
         == "cannot_determine_technical_vs_biological"
@@ -209,106 +207,73 @@ def test_recommendation_matrix() -> None:
         recommend("recurring_sample_associated", "orthogonal_but_not_known_technical")
         == "integration_optional_for_confirmed_replicates"
     )
-    assert (
-        recommend("recurring_sample_associated", "documented_technical_batch")
-        == "integration_supported"
+
+
+# --- compact decision state --------------------------------------------------
+
+
+def test_compact_evidence_keeps_currency_and_artifact_pointer_only() -> None:
+    compact = _g("compact_evidence")
+    result = compact(
+        {
+            "schema_version": 1,
+            "status": "complete",
+            "evidence_id": "batch-evidence:e1",
+            "batch_key": "donor",
+            "recommendation": "cannot_determine_technical_vs_biological",
+            "artifact_path": "artifacts/batch-evidence.json",
+            "cell_set_id": "cells-a",
+            "count_representation_id": "counts-a",
+            "representation_id": "rep-a",
+            "clustering_id": "cluster-a",
+            "supported_identity_pairs": [{"shared_genes": ["LYZ"]}],
+        }
     )
+    assert result == {
+        "schema_version": 1,
+        "status": "complete",
+        "evidence_id": "batch-evidence:e1",
+        "batch_key": "donor",
+        "recommendation": "cannot_determine_technical_vs_biological",
+        "artifact_path": "artifacts/batch-evidence.json",
+        "cell_set_id": "cells-a",
+        "count_representation_id": "counts-a",
+    }
 
 
-# --- decision gating ---------------------------------------------------------
-
-
-def test_non_integration_decisions_always_allowed() -> None:
-    validate = _g("validate_decision")
-    for decision in ("keep_uncorrected", "separate", "request_guidance", "not_applicable"):
-        assert (
-            validate(decision, "cannot_determine_technical_vs_biological", None, None)["ok"] is True
-        )
-
-
-def test_integrate_requires_explicit_basis() -> None:
-    validate = _g("validate_decision")
-    assert validate("integrate", "integration_supported", None, None)["ok"] is False
-
-
-def test_integrate_allowed_when_recommendation_supports_it() -> None:
-    validate = _g("validate_decision")
-    assert (
-        validate("integrate", "integration_supported", "documented_technical_batch", None)["ok"]
-        is True
+def test_decision_persists_only_choice_rationale_and_evidence_id(tmp_path: Path) -> None:
+    context = SimpleNamespace(
+        state_facts={
+            "batch": {
+                "evidence": {
+                    "status": "complete",
+                    "evidence_id": "batch-evidence:e1",
+                }
+            }
+        },
+        staging_dir=tmp_path,
     )
-
-
-def test_integrate_against_evidence_requires_override_warning() -> None:
-    validate = _g("validate_decision")
-    blocked = validate(
-        "integrate",
-        "cannot_determine_technical_vs_biological",
-        "user_authorized_comparable_replicates",
-        None,
+    result = _handler("decide_batch_handling")(
+        {
+            "decision": "integrate",
+            "evidence_id": "batch-evidence:e1",
+            "rationale": "The user selected a shared corrected representation.",
+        },
+        context,
     )
-    assert blocked["ok"] is False
-    allowed = validate(
-        "integrate",
-        "cannot_determine_technical_vs_biological",
-        "user_authorized_comparable_replicates",
-        "User confirmed the samples are technical replicates of one biological condition.",
-    )
-    assert allowed["ok"] is True
-
-
-def test_integration_optional_needs_replicate_basis() -> None:
-    validate = _g("validate_decision")
-    # A documented-technical basis does not by itself clear the optional-replicates recommendation
-    # without an override; the replicate basis does.
-    assert (
-        validate(
-            "integrate",
-            "integration_optional_for_confirmed_replicates",
-            "user_authorized_comparable_replicates",
-            None,
-        )["ok"]
-        is True
-    )
-
-
-# --- integration basis must be backed by the evidence ------------------------
-
-
-def test_documented_technical_basis_requires_documented_evidence() -> None:
-    check = _g("validate_integration_basis")
-    # Evidence never recorded a documented technical batch.
-    assert check("documented_technical_batch", {})["ok"] is False
-    assert (
-        check("documented_technical_batch", {"technical_batch_documented": True})["ok"] is False
-    )  # missing basis
-    assert (
-        check(
-            "documented_technical_batch",
-            {"technical_batch_documented": True, "technical_batch_basis": "   "},
-        )["ok"]
-        is False
-    )  # blank basis
-    assert (
-        check(
-            "documented_technical_batch",
-            {
-                "technical_batch_documented": True,
-                "technical_batch_basis": "10x run recorded in metadata",
-            },
-        )["ok"]
-        is True
-    )
-
-
-def test_replicate_basis_needs_no_evidence_documentation() -> None:
-    check = _g("validate_integration_basis")
-    assert check("user_authorized_comparable_replicates", {})["ok"] is True
-    assert check(None, {})["ok"] is True
-
-
-def test_decision_policy_version_is_declared() -> None:
-    assert _g("DECISION_POLICY_VERSION") == 1
+    expected = {
+        "decision": "integrate",
+        "evidence_id": "batch-evidence:e1",
+        "rationale": "The user selected a shared corrected representation.",
+    }
+    assert result["details"] == expected
+    assert result["facts_patch"] == {"batch": {"decision": expected}}
+    assert result["decisions_patch"] == {
+        "batch_handling": {
+            "decision": "integrate",
+            "rationale": "The user selected a shared corrected representation.",
+        }
+    }
 
 
 # --- identity resolution -----------------------------------------------------
@@ -345,6 +310,136 @@ def test_resolve_identities_derives_missing_values_from_artifact() -> None:
         "clustering_id",
     }
     assert all(":sha256:" in value for value in resolved.values())
+
+
+# --- plain-language interpretation (grounded, no assumed biology) ------------
+
+
+def test_concordance_reports_ari_nmi_and_flags_tracking() -> None:
+    pytest.importorskip("sklearn")  # ARI/NMI run in the compute env; venv may lack scikit-learn
+    concord = _g("cluster_batch_concordance")
+    # Clusters that perfectly follow sample identity -> high agreement, tracks_sample True.
+    tracked = concord(["s1", "s1", "s2", "s2"], ["0", "0", "1", "1"])
+    assert tracked["tracks_sample"] is True
+    assert tracked["ari"] > 0.5
+    assert "correspond to individual samples" in tracked["interpretation"]
+    # Clusters independent of sample -> low agreement, well mixed.
+    mixed = concord(["s1", "s2", "s1", "s2"], ["0", "0", "1", "1"])
+    assert mixed["tracks_sample"] is False
+    assert "well mixed" in mixed["interpretation"]
+
+
+def test_plain_interpretation_names_real_genes_and_defers_when_design_unknown() -> None:
+    build = _g("build_plain_interpretation")
+    text = build(
+        batch_key="sample",
+        n_regions=30,
+        pairs=[
+            {
+                "cluster_a": "17",
+                "batch_a": "Donor_05",
+                "cluster_b": "10",
+                "batch_b": "Donor_08",
+                "shared_genes": ["C1QB", "C1QA", "TYROBP"],
+                "higher_in_a": ["CCL18", "FABP4"],
+                "higher_in_b": ["FOLR3", "FN1"],
+            }
+        ],
+        recurring_by_sample={"Donor_06": ["HLA-C", "XIST"]},
+        gene_evidence="recurring_sample_associated",
+        design_interpretation="unknown",
+        recommendation="cannot_determine_technical_vs_biological",
+        concordance={
+            "ari": 0.51,
+            "nmi": 0.68,
+            "interpretation": "clusters largely correspond to individual samples",
+        },
+        mixing={
+            "status": "complete",
+            "mean_same_batch_neighbor_fraction": 0.89,
+            "random_composition_same_batch_fraction": 0.13,
+        },
+    )
+    # Every gene named comes from the inputs; no disease/tissue is invented.
+    assert "C1QB" in text and "CCL18" in text and "FOLR3" in text
+    assert "tumor" not in text.lower() and "cancer" not in text.lower()
+    # The design-unknown branch defers rather than deciding, and the mixing caveat is present.
+    assert "no experimental-design information was provided" in text
+    assert "should not be integrated automatically" in text
+    assert "WHERE samples separate, never WHY" in text
+    assert "confirm whether these samples are meant to be comparable replicates" in text
+
+
+def test_plain_interpretation_localized_when_no_recurrence() -> None:
+    build = _g("build_plain_interpretation")
+    text = build(
+        batch_key="sample",
+        n_regions=5,
+        pairs=[
+            {
+                "cluster_a": "1",
+                "batch_a": "A",
+                "cluster_b": "2",
+                "batch_b": "B",
+                "shared_genes": ["CD3D"],
+                "higher_in_a": ["IL7R"],
+                "higher_in_b": ["GZMB"],
+            }
+        ],
+        recurring_by_sample={},
+        gene_evidence="localized",
+        design_interpretation="unknown",
+        recommendation="cannot_determine_technical_vs_biological",
+        concordance={
+            "ari": 0.1,
+            "nmi": 0.1,
+            "interpretation": "clusters are largely independent of sample (well mixed)",
+        },
+        mixing=None,
+    )
+    assert "localized to a few populations" in text
+
+
+def test_terminal_summary_is_compact_legacy_shaped_and_stops_for_user_choice() -> None:
+    build = _g("build_terminal_summary")
+    text = build(
+        batch_key="sample",
+        n_regions=12,
+        supported_pairs=[
+            {
+                "cluster_a": "17",
+                "batch_a": "Donor_05",
+                "cluster_b": "10",
+                "batch_b": "Donor_08",
+                "signature_similarity": 0.42,
+                "shared_genes": ["C1QA", "C1QB", "TYROBP"],
+            }
+        ],
+        recurring=[
+            {
+                "gene": "SOD2",
+                "higher_in_batch": "Donor_05",
+                "n_populations": 3,
+            }
+        ],
+        gene_evidence="recurring_sample_associated",
+        design_interpretation="unknown",
+        recommendation="cannot_determine_technical_vs_biological",
+        concordance={"ari": 0.51, "nmi": 0.68},
+        mixing={
+            "status": "complete",
+            "mean_same_batch_neighbor_fraction": 0.89,
+            "random_composition_same_batch_fraction": 0.13,
+        },
+    )
+
+    assert "cluster 17 in Donor_05 vs cluster 10 in Donor_08" in text
+    assert "signature similarity 0.42" in text
+    assert "C1QA" in text and "SOD2" in text
+    assert "ARI 0.51, NMI 0.68" in text
+    assert "strong-signature threshold" not in text
+    assert "Do not record a batch-handling decision until the user chooses" in text
+    assert len(text) < 4_000
 
 
 # --- advisory figure layout (retained) --------------------------------------

@@ -222,6 +222,34 @@ def test_elapsed_status_reports_the_growing_wait() -> None:
     assert rendered() == "Training scVI... (7s)"
 
 
+def test_elapsed_status_appends_live_progress_detail() -> None:
+    clock = [100.0]
+    detail: list[str | None] = [None]
+    console = Console(file=StringIO(), force_terminal=False, width=80)
+    label = ElapsedStatus("Training scVI", clock=lambda: clock[0], progress=lambda: detail[0])
+
+    def rendered() -> str:
+        with console.capture() as capture:
+            console.print(label)
+        return capture.get().strip()
+
+    assert rendered() == "Training scVI... (0s)"
+    detail[0] = "Epoch 3/200"
+    # Same object, new epoch line: the spinner surfaces worker progress on the next refresh.
+    assert rendered() == "Training scVI... (0s) Epoch 3/200"
+
+
+def test_on_tool_progress_updates_the_spinner_and_clears_on_finish() -> None:
+    observer = RichRuntimeObserver(Console(file=StringIO(), force_terminal=False))
+    activity = ToolActivity(tool_name="train_scvi_latent", label="Training scVI latent model")
+    observer.on_tool_started(activity)
+    assert observer._progress_text is None
+    observer.on_tool_progress(activity, "Epoch 12/200:  6%|  | 12/200")
+    assert observer._progress_text == "Epoch 12/200:  6%|  | 12/200"
+    observer.on_tool_finished(activity, summary=None)
+    assert observer._progress_text is None
+
+
 def test_format_elapsed_switches_to_minutes() -> None:
     assert format_elapsed(0) == "0s"
     assert format_elapsed(59) == "59s"

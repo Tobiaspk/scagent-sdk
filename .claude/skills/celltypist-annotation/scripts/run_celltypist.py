@@ -98,7 +98,7 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     path = Path(str(arguments["path"])).expanduser().resolve()
     if not path.exists():
         raise FileNotFoundError(path)
-    model = str(arguments.get("model", "Immune_All_Low.pkl"))
+    model = str(arguments["model"])
     counts_arg = arguments.get("counts_layer", "counts")
     counts_layer = str(counts_arg) if counts_arg is not None else None
     output_key = str(arguments.get("output_key", "celltypist_prediction"))
@@ -161,7 +161,7 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     )
     adata.uns["scagent_sdk"] = metadata
     output_name = "celltypist-annotated.zarr"
-    final_path = f"artifacts/capabilities/{context.execution_id}/{output_name}"
+    final_path = f"{context.artifact_relative_path}/{output_name}"
     _write_matrix(adata, context.staging_dir / output_name)
     cell_table = pd.DataFrame(
         {
@@ -320,7 +320,7 @@ def summarize_by_cluster(arguments: dict[str, Any], context: Any) -> dict[str, A
                         "prediction_key": prediction_key,
                         "cluster_predictions": predictions,
                         "artifact_path": (
-                            f"artifacts/capabilities/{context.execution_id}/"
+                            f"{context.artifact_relative_path}/"
                             "celltypist-cluster-predictions.csv"
                         ),
                     }

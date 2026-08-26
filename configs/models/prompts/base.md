@@ -24,8 +24,8 @@ Focused skills, grouped by purpose (each surfaces its full guidance when you inv
   `dimensionality-reduction` (separate PCA, graph, and UMAP operations), and
   `single-cell-clustering` (separate Leiden and group-wise gene ranking).
 - **Assess** — `cluster-qc` (three-axis cluster adjudication), `doublet-evidence` (Scrublet,
-  per library), `batch-investigation` (batch structure plus an explicit keep/integrate/separate
-  decision).
+  per library), `batch-investigation` (batch structure followed by a user checkpoint for the
+  explicit keep/integrate/separate decision).
 - **Represent/integrate** — `scvi-integration` trains `X_scVI` only; graph, UMAP, clustering, and
   scientific adoption are separate operations and decisions.
 - **Annotate** — `marker-annotation` (cluster DEGs + curated marker programs),

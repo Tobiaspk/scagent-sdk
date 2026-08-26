@@ -30,7 +30,9 @@ def _g(name: str) -> Any:
 
 def test_manifest_bumped_and_declares_three_axis_parameters() -> None:
     package = _package()
-    assert package.manifest.version == "0.6.0"
+    assert package.manifest.version == "0.7.0"
+    tool = next(tool for tool in package.manifest.tools if tool.name == "evaluate_cluster_qc")
+    assert tool.input_schema["properties"]["max_cells_for_silhouette"]["default"] == 3000
     assert {tool.name for tool in package.manifest.tools} == {
         "evaluate_cluster_qc",
         "review_cluster_qc",

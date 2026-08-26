@@ -26,7 +26,7 @@ tools:
     primary_matrix_input: path
     primary_matrix_output: qc-anndata
   - name: review_single_cell_qc
-    description: Record a visual, evidence-bound QC decision after inspecting every standard QC figure; filtering remains a separate explicit mutation.
+    description: Record a visual, evidence-bound QC decision after inspecting the attached standard QC figures; attached paths are recorded automatically and filtering remains a separate explicit mutation.
     entrypoint: scripts/qc.py:review_qc
     environment: current
     activity_label: Recording cell QC review
@@ -44,10 +44,10 @@ tools:
           items: {type: string, minLength: 1}
         reviewed_artifacts:
           type: array
-          minItems: 1
           uniqueItems: true
           items: {type: string, minLength: 1}
-      required: [assessment_id, decision, rationale, visual_findings, reviewed_artifacts]
+          default: []
+      required: [assessment_id, decision, rationale, visual_findings]
       additionalProperties: false
   - name: filter_single_cells
     description: Apply explicit detected-gene and mitochondrial thresholds to a count-bearing H5AD, saving a new artifact and cell-set identity.

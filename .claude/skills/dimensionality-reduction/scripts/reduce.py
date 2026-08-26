@@ -25,6 +25,18 @@ def _write_matrix(adata, path):
     else:
         adata.write_h5ad(path, compression="gzip")
 
+
+def _to_gpu(adata: Any) -> None:
+    from rapids_singlecell.get import anndata_to_GPU
+
+    anndata_to_GPU(adata, convert_all=True)
+
+
+def _to_cpu(adata: Any) -> None:
+    from rapids_singlecell.get import anndata_to_CPU
+
+    anndata_to_CPU(adata, convert_all=True)
+
 def _identity(kind: str, value: Any) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()
     return f"{kind}:sha256:{hashlib.sha256(encoded).hexdigest()}"
@@ -53,7 +65,7 @@ def _publish(
     report: dict[str, Any],
     artifact_name: str,
 ) -> tuple[str, list[dict[str, str]]]:
-    final_path = f"artifacts/capabilities/{context.execution_id}/{output_name}"
+    final_path = f"{context.artifact_relative_path}/{output_name}"
     _write_matrix(adata, context.staging_dir / output_name)
     (context.staging_dir / report_name).write_text(
         json.dumps(report, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8"
@@ -75,7 +87,7 @@ def _publish(
 def compute_pca(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     import matplotlib.pyplot as plt
     import numpy as np
-    import scanpy as sc
+    import rapids_singlecell as rsc
 
     path, adata = _load(arguments)
     requested = int(arguments.get("n_components", 50))
@@ -92,12 +104,14 @@ def compute_pca(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     n_components = min(requested, int(adata.n_obs) - 1, available_genes - 1)
     if n_components < 2:
         raise ValueError("at least three cells and three eligible genes are required for PCA")
-    sc.tl.pca(
+    _to_gpu(adata)
+    rsc.pp.pca(
         adata,
         n_comps=n_components,
-        use_highly_variable=use_hvg,
+        mask_var="highly_variable" if use_hvg else None,
         random_state=seed,
     )
+    _to_cpu(adata)
     metadata = dict(adata.uns.get("scagent_sdk", {}))
     cell_set_id = metadata.get("cell_set_id") or _identity(
         "cells", sorted(map(str, adata.obs_names))
@@ -111,6 +125,7 @@ def compute_pca(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
             "n_components": n_components,
             "use_highly_variable": use_hvg,
             "random_seed": seed,
+            "compute_backend": "rapids_singlecell",
         },
     )
     metadata.update(
@@ -129,6 +144,7 @@ def compute_pca(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
         "n_components": n_components,
         "use_highly_variable": use_hvg,
         "random_seed": seed,
+        "compute_backend": "rapids_singlecell",
     }
     variance_ratio = np.asarray(adata.uns["pca"]["variance_ratio"], dtype=float)
     components = np.arange(1, variance_ratio.size + 1)
@@ -210,7 +226,7 @@ def compute_pca(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
 
 
 def build_neighbors(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
-    import scanpy as sc
+    import rapids_singlecell as rsc
 
     path, adata = _load(arguments)
     representation_key = str(arguments.get("representation_key", "X_pca"))
@@ -223,7 +239,8 @@ def build_neighbors(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
         raise ValueError(f"representation {representation_key!r} is absent from obsm")
     if n_neighbors < 2:
         raise ValueError("at least three cells are required for a neighbor graph")
-    sc.pp.neighbors(
+    _to_gpu(adata)
+    rsc.pp.neighbors(
         adata,
         n_neighbors=n_neighbors,
         n_pcs=n_pcs,
@@ -231,6 +248,7 @@ def build_neighbors(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
         key_added=None if neighbors_key == "neighbors" else neighbors_key,
         random_state=seed,
     )
+    _to_cpu(adata)
     metadata = dict(adata.uns.get("scagent_sdk", {}))
     source_id = metadata.get("representation_id") or _identity(
         "representation-source",
@@ -249,6 +267,7 @@ def build_neighbors(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
             "n_neighbors": n_neighbors,
             "n_pcs": n_pcs,
             "random_seed": seed,
+            "compute_backend": "rapids_singlecell",
         },
     )
     metadata.update({"representation_id": source_id, "neighbor_graph_id": graph_id})
@@ -262,6 +281,7 @@ def build_neighbors(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
         "n_neighbors": n_neighbors,
         "n_pcs": n_pcs,
         "random_seed": seed,
+        "compute_backend": "rapids_singlecell",
     }
     _, artifacts = _publish(
         adata,
@@ -301,7 +321,7 @@ def build_neighbors(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
 
 
 def compute_umap(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
-    import scanpy as sc
+    import rapids_singlecell as rsc
 
     path, adata = _load(arguments)
     neighbors_key = str(arguments.get("neighbors_key", "neighbors"))
@@ -312,7 +332,8 @@ def compute_umap(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     if neighbors_key not in adata.uns:
         raise ValueError(f"neighbor graph {neighbors_key!r} is absent")
     scanpy_key = _scanpy_umap_key(umap_key)
-    sc.tl.umap(
+    _to_gpu(adata)
+    rsc.tl.umap(
         adata,
         neighbors_key=None if neighbors_key == "neighbors" else neighbors_key,
         min_dist=min_dist,
@@ -320,6 +341,7 @@ def compute_umap(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
         random_state=seed,
         key_added=scanpy_key,
     )
+    _to_cpu(adata)
     actual_key = "X_umap" if scanpy_key is None else scanpy_key
     if actual_key not in adata.obsm:
         raise RuntimeError(
@@ -335,6 +357,7 @@ def compute_umap(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
             "min_dist": min_dist,
             "spread": spread,
             "random_seed": seed,
+            "compute_backend": "rapids_singlecell",
         },
     )
     metadata = dict(adata.uns.get("scagent_sdk", {}))
@@ -347,6 +370,7 @@ def compute_umap(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
         "min_dist": min_dist,
         "spread": spread,
         "random_seed": seed,
+        "compute_backend": "rapids_singlecell",
     }
     _, artifacts = _publish(
         adata,

@@ -56,6 +56,7 @@ FACT_ROOT_SCOPES: dict[str, Scope] = {
     "cluster_qc": "node",
     "doublets": "node",
     "finalization": "node",
+    "group_gene_ranking": "node",
     # Session-scoped: properties of the input, or caches keyed independently of the active branch.
     "custom_analysis": "session",
     "dataset": "session",

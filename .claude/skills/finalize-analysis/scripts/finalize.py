@@ -311,6 +311,9 @@ def _render_report(
 
     batch_evidence = batch.get("evidence", {}) if isinstance(batch, dict) else {}
     batch_decision = batch.get("decision", {}) if isinstance(batch, dict) else {}
+    recorded_batch_decision = batch_decision.get("decision", "not recorded")
+    if batch_evidence.get("status") == "not_applicable":
+        recorded_batch_decision = "not_applicable"
     lines.extend(
         [
             "",
@@ -318,7 +321,7 @@ def _render_report(
             "",
             f"- Evidence status: `{batch_evidence.get('status', 'not recorded')}`",
             f"- Recommendation: `{batch_evidence.get('recommendation', 'not recorded')}`",
-            f"- Decision: `{batch_decision.get('decision', 'not recorded')}`",
+            f"- Decision: `{recorded_batch_decision}`",
             f"- Rationale: {batch_decision.get('rationale', 'not recorded')}",
             "",
             "## Annotation evidence and adjudication",
@@ -538,8 +541,8 @@ def _execute_finalization(arguments: dict[str, Any], context: Any) -> dict[str, 
             "media_type": "image/png",
         }
     )
-    final_path = f"artifacts/capabilities/{context.execution_id}/final-annotated.h5ad"
-    report_path = f"artifacts/capabilities/{context.execution_id}/analysis-report.md"
+    final_path = f"{context.artifact_relative_path}/final-annotated.h5ad"
+    report_path = f"{context.artifact_relative_path}/analysis-report.md"
     artifacts = [
         {
             "name": "final-annotated-anndata",

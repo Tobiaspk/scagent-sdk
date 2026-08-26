@@ -217,9 +217,9 @@ def test_no_directive_is_emitted_when_a_result_carries_no_pixels(tmp_path: Path)
     assert Executor._model_content(context, CapabilityResult(summary="no figures")) == []
 
 
-def test_media_ceiling_admits_a_full_per_cluster_heatmap_set() -> None:
+def test_media_ceiling_bounds_model_context_even_when_artifacts_are_complete() -> None:
     from scagent_sdk.capabilities.results import MODEL_MEDIA_LIMIT
 
-    # A cluster-QC pass renders one heatmap per cluster plus three overview figures. The old
-    # ceiling of 8 made the review floor unsatisfiable from what the model had been shown.
-    assert MODEL_MEDIA_LIMIT >= 3 + 28
+    # Complete heatmap sets stay registered on disk; only a compact decision surface belongs in
+    # a tool result that will be replayed through the model context.
+    assert MODEL_MEDIA_LIMIT == 8

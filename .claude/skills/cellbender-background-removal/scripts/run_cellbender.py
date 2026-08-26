@@ -610,7 +610,7 @@ def _failed_result(
     checkpoint_path = None
     if checkpoint:
         checkpoint_path = (
-            f"artifacts/capabilities/{context.execution_id}/{checkpoint['relative_path']}"
+            f"{context.artifact_relative_path}/{checkpoint['relative_path']}"
         )
     return {
         "summary": f"CellBender did not complete; active data were unchanged. {reason}",

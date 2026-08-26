@@ -230,7 +230,7 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     )
     adata.uns["scagent_sdk"] = metadata
     output_name = "scimilarity-annotated.zarr"
-    final_path = f"artifacts/capabilities/{context.execution_id}/{output_name}"
+    final_path = f"{context.artifact_relative_path}/{output_name}"
     _write_matrix(adata, context.staging_dir / output_name)
     columns: dict[str, Any] = {
         "cell": adata.obs_names.astype(str),
@@ -426,7 +426,7 @@ def summarize_by_cluster(arguments: dict[str, Any], context: Any) -> dict[str, A
                         "prediction_key": prediction_key,
                         "cluster_predictions": predictions,
                         "artifact_path": (
-                            f"artifacts/capabilities/{context.execution_id}/"
+                            f"{context.artifact_relative_path}/"
                             "scimilarity-cluster-predictions.csv"
                         ),
                     }

@@ -67,7 +67,12 @@ def test_runtime_turn_binds_sdk_session_and_persists_transcript_events(tmp_path:
 
     assert response.final_text == "done"
     assert backend.requests[0].resume_session_id is None
-    assert "New user request:\nContinue analysis" in backend.requests[0].prompt
+    # A brand-new session has nothing to resume: the model gets its request directly, with no
+    # "resume from the durable checkpoint" preamble over an empty checkpoint.
+    assert backend.requests[0].prompt == "Continue analysis"
+    assert "durable checkpoint" not in backend.requests[0].prompt
+    started = [e for e in session.store.events() if e.kind == "runtime.turn_started"][0]
+    assert started.payload["resume_mode"] == "fresh"
     assert session.store.state.runtime["active"]["runtime_session_id"] == "sdk-new"
     assert session.store.state.runtime["active"]["model_profile_fingerprint"] == profile.fingerprint
     kinds = [event.kind for event in session.store.events()]
@@ -314,7 +319,7 @@ def test_preflight_rollover_reconstructs_without_losing_scientific_state(
     assert session.store.state.runtime["active"]["runtime_session_id"] == "sdk-reconstructed"
     assert observer.rollovers == [
         {
-            "reason": "preflight usage reached the model's context reserve",
+            "reason": "runtime context reached its reserve during the active turn",
             "total_tokens": 230_145,
             "context_window_tokens": 262_144,
         }
@@ -343,6 +348,60 @@ def test_provider_context_error_rolls_over_once_in_automatic_mode(tmp_path: Path
 
     assert response.runtime_session_id == "sdk-fresh"
     assert [request.resume_session_id for request in backend.requests] == ["sdk-full", None]
+
+
+def test_provider_context_error_in_a_fresh_turn_reconstructs_and_continues(
+    tmp_path: Path,
+) -> None:
+    session = AnalysisSession.create(tmp_path / "sessions", title="Fresh provider rejection")
+    profile = _profile(tmp_path)
+    rejected = RuntimeResponse(
+        runtime_session_id="sdk-fresh-full",
+        messages=(),
+        final_text="ContextWindowExceededError: maximum context length is 262144 tokens",
+        stop_reason=None,
+        is_error=True,
+        subtype="error",
+    )
+    backend = SequentialBackend([rejected, _response("sdk-rebuilt")])
+
+    response = asyncio.run(
+        AgentRuntimeService(backend).run_turn(
+            session, user_prompt="analyze end to end", profile=profile, cwd=tmp_path
+        )
+    )
+
+    assert response.runtime_session_id == "sdk-rebuilt"
+    assert [request.resume_session_id for request in backend.requests] == [None, None]
+    rollover = next(
+        event for event in session.store.events() if event.kind == "runtime.context_rolled_over"
+    )
+    assert rollover.payload["old_runtime_session_id"] == "sdk-fresh-full"
+
+
+def test_one_turn_can_roll_over_more_than_once(tmp_path: Path) -> None:
+    session = AnalysisSession.create(tmp_path / "sessions", title="Long analysis")
+    profile = _profile(tmp_path)
+    backend = SequentialBackend(
+        [
+            ContextRolloverRequired("first full", total_tokens=230_000),
+            ContextRolloverRequired("second full", total_tokens=231_000),
+            _response("sdk-third-conversation"),
+        ]
+    )
+
+    response = asyncio.run(
+        AgentRuntimeService(backend).run_turn(
+            session, user_prompt="continue until complete", profile=profile, cwd=tmp_path
+        )
+    )
+
+    assert response.runtime_session_id == "sdk-third-conversation"
+    assert len(backend.requests) == 3
+    assert all(request.resume_session_id is None for request in backend.requests)
+    assert len(
+        [event for event in session.store.events() if event.kind == "runtime.context_rolled_over"]
+    ) == 2
 
 
 def test_explicit_exact_resume_never_silently_reconstructs(tmp_path: Path) -> None:
@@ -408,3 +467,35 @@ def test_subsequent_exact_turn_uses_checkpoint_reference_not_full_state_dump(
     assert "marker evidence" not in backend.requests[1].prompt
     assert "authoritative_state" in backend.requests[1].prompt
     assert len(backend.requests[1].prompt) < len(backend.requests[0].prompt)
+
+
+def test_new_session_plans_fresh_without_checkpoint_framing(tmp_path: Path) -> None:
+    session = AnalysisSession.create(tmp_path / "sessions", title="Fresh")
+    profile = _profile(tmp_path)
+
+    plan = session.plan_resume(
+        runtime="claude-agent-sdk",
+        model_profile=profile.name,
+        model_profile_fingerprint=profile.fingerprint,
+    )
+
+    assert plan.mode is ResumeMode.FRESH
+    assert plan.runtime_session_id is None
+    assert plan.context == ""
+
+
+def test_reopened_session_with_state_is_not_fresh(tmp_path: Path) -> None:
+    session = AnalysisSession.create(tmp_path / "sessions", title="Has state")
+    profile = _profile(tmp_path)
+    session.checkpoint_facts({"dataset": {"path": "/data/a.h5ad"}}, reason="loaded")
+
+    # No resumable runtime session recorded (e.g. a local backend that never bound one), so this
+    # falls to reconstruction — but it must NOT be mistaken for a brand-new session.
+    plan = session.plan_resume(
+        runtime="claude-agent-sdk",
+        model_profile=profile.name,
+        model_profile_fingerprint=profile.fingerprint,
+    )
+
+    assert plan.mode is ResumeMode.RECONSTRUCTED
+    assert "durable checkpoint" in plan.context

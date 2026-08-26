@@ -33,6 +33,28 @@ def test_custom_python_has_no_ast_denylist() -> None:
     assert 'compile(code, "analysis.py", "exec")' in source
 
 
+def test_text_reader_returns_explicit_nonrecursive_pages(tmp_path: Path) -> None:
+    path = tmp_path / "state.json"
+    path.write_text("abcdefghij", encoding="utf-8")
+    handler = _tool("read_text_file")
+
+    first = handler({"path": str(path), "max_chars": 4}, SimpleNamespace())
+    second = handler(
+        {"path": str(path), "offset_chars": first["details"]["next_offset_chars"], "max_chars": 4},
+        SimpleNamespace(),
+    )
+
+    assert first["details"] == {
+        "path": str(path),
+        "text": "abcd",
+        "offset_chars": 0,
+        "next_offset_chars": 4,
+        "truncated": True,
+    }
+    assert second["details"]["text"] == "efgh"
+    assert second["details"]["next_offset_chars"] == 8
+
+
 def test_general_shell_supports_pipes_expansion_and_provenance(tmp_path: Path) -> None:
     staging = tmp_path / "stage"
     staging.mkdir()

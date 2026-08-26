@@ -141,6 +141,42 @@ MARKER = "legacy"
 # --- GPU pinning -------------------------------------------------------------
 
 
+def test_forward_progress_keeps_bar_lines_and_drops_chatter() -> None:
+    seen: list[str] = []
+    # An ANSI-wrapped tqdm/Lightning epoch bar is surfaced, stripped of escape codes.
+    EnvironmentBroker._forward_progress(
+        b"\x1b[2KEpoch 5/200:  2%|\xe2\x96\x8a| 5/200 [00:01<00:40]", seen.append
+    )
+    # An ordinary log line is not progress and must not flood the spinner.
+    EnvironmentBroker._forward_progress(b"loading reference model", seen.append)
+    assert seen == ["Epoch 5/200:  2%|▊| 5/200 [00:01<00:40]"]
+
+
+def test_run_worker_streams_progress_and_captures_output(tmp_path: Path) -> None:
+    broker = EnvironmentBroker(EnvironmentRegistry({}))
+    updates: list[str] = []
+    # A worker that emits a carriage-return progress bar to stderr (as tqdm does) and a normal
+    # stdout line; both must be captured, and only the bar forwarded as live progress.
+    program = (
+        "import sys\n"
+        "sys.stdout.write('starting worker\\n')\n"
+        "sys.stderr.write('Epoch 7/10:  70%|##| 7/10 [00:00<00:00]\\r')\n"
+        "sys.stderr.flush()\n"
+    )
+    completed = broker._run_worker(
+        [sys.executable, "-c", program],
+        {"PATH": "/usr/bin:/bin"},
+        execution_id="exec-1",
+        label="train_scvi_latent",
+        timeout_seconds=30,
+        progress=updates.append,
+    )
+    assert completed.returncode == 0
+    assert "starting worker" in completed.stdout
+    assert "Epoch 7/10" in completed.stderr
+    assert any("Epoch 7/10" in line for line in updates)
+
+
 def test_select_gpu_devices_prefers_most_free_memory() -> None:
     from scagent_sdk.execution.broker import EnvironmentBroker
 

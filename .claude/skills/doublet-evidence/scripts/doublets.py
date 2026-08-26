@@ -470,7 +470,7 @@ def _execute_evidence(arguments: dict[str, Any], context: Any) -> dict[str, Any]
     )
     output_relative = "doublet-annotated.zarr"
     output_path = context.staging_dir / output_relative
-    final_path = f"artifacts/capabilities/{context.execution_id}/{output_relative}"
+    final_path = f"{context.artifact_relative_path}/{output_relative}"
     provenance = dict(provenance)
     provenance.update(
         {
@@ -710,7 +710,7 @@ def _execute_review(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
         )
         output_relative = "doublet-filtered-raw-counts.zarr"
         output_path = context.staging_dir / output_relative
-        final_path = f"artifacts/capabilities/{context.execution_id}/{output_relative}"
+        final_path = f"{context.artifact_relative_path}/{output_relative}"
         filtered.uns = {
             "scagent_sdk": {
                 "schema_version": 1,

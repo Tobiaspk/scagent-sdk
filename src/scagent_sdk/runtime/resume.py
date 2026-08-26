@@ -17,12 +17,30 @@ from scagent_sdk.errors import RuntimeExecutionError
 MAX_RESUME_CONTEXT_CHARS = 96 * 1024
 MAX_RECENT_TURNS = 4
 MAX_RECENT_RESPONSE_CHARS = 8 * 1024
+MAX_ARTIFACT_SUMMARY_CHARS = 1200
+MAX_ARTIFACT_FILES = 8
+
+# Exhaustive drill-down collections belong in the complete event-sourced state, but replaying
+# them is not useful continuation context once their status, evidence id, and summary are recorded.
+_HANDOFF_BULK_KEYS = frozenset(
+    {
+        "available_cluster_heatmaps",
+        "cluster_reviews",
+        "plain_interpretation",
+        "recurring_programs",
+        "required_visual_artifacts",
+        "reviewed_artifacts",
+        "shown_visual_artifacts",
+        "supported_identity_pairs",
+    }
+)
 
 
 class ResumeMode(str, Enum):
     EXACT = "exact"
     FORK = "fork"
     RECONSTRUCTED = "reconstructed"
+    FRESH = "fresh"
 
 
 class ResumePreference(str, Enum):
@@ -54,7 +72,7 @@ def _artifact_summary(value: Any) -> Any:
 
     if not isinstance(value, dict):
         return value
-    kept = {}
+    kept: dict[str, Any] = {}
     for key in (
         "artifact_id",
         "execution_id",
@@ -65,7 +83,6 @@ def _artifact_summary(value: Any) -> Any:
         "summary",
         "path",
         "relative_path",
-        "files",
         "created_at",
         "input_state_revision",
         "fingerprint",
@@ -73,7 +90,53 @@ def _artifact_summary(value: Any) -> Any:
     ):
         if key in value:
             kept[key] = value[key]
+    summary = kept.get("summary")
+    if isinstance(summary, str) and len(summary) > MAX_ARTIFACT_SUMMARY_CHARS:
+        kept["summary"] = summary[:MAX_ARTIFACT_SUMMARY_CHARS].rstrip() + "…"
+    files = value.get("files")
+    if isinstance(files, list):
+        compact_files = [
+            {
+                key: file[key]
+                for key in ("name", "relative_path", "media_type", "size_bytes")
+                if key in file
+            }
+            for file in files[:MAX_ARTIFACT_FILES]
+            if isinstance(file, dict)
+        ]
+        kept["files"] = compact_files
+        kept["file_count"] = len(files)
+        if len(files) > len(compact_files):
+            kept["files_omitted_from_handoff"] = len(files) - len(compact_files)
     return kept or {"keys": sorted(str(key) for key in value)}
+
+
+def _handoff_projection(value: Any) -> Any:
+    """Project durable state into decision-ready rollover context.
+
+    Current status, identities, scalar findings, summaries, decisions, and unresolved work remain
+    inline. Large evidence collections are represented by count and hash, so the model can continue
+    without rediscovering ordinary state from ``state.json``.
+    """
+
+    if isinstance(value, dict):
+        projected: dict[str, Any] = {}
+        omitted: dict[str, dict[str, Any]] = {}
+        for key, item in value.items():
+            name = str(key)
+            if name in _HANDOFF_BULK_KEYS:
+                omitted[name] = {
+                    "count": len(item) if isinstance(item, (dict, list)) else None,
+                    "sha256": _sha256_json(item),
+                }
+            else:
+                projected[name] = _handoff_projection(item)
+        if omitted:
+            projected["_drilldown_omitted"] = omitted
+        return projected
+    if isinstance(value, list):
+        return [_handoff_projection(item) for item in value]
+    return value
 
 
 def _recent_turns(events: Iterable[SessionEvent]) -> list[dict[str, Any]]:
@@ -107,6 +170,27 @@ def _recent_turns(events: Iterable[SessionEvent]) -> list[dict[str, Any]]:
             item["outcome"] = event.kind.removeprefix("runtime.turn_")
             completed.append(item)
     return completed[-MAX_RECENT_TURNS:]
+
+
+def _has_prior_runtime_turn(events: Iterable[SessionEvent]) -> bool:
+    """True once any model turn has been started in this scientific session."""
+
+    return any(
+        event.kind
+        in {
+            "runtime.turn_started",
+            "runtime.turn_completed",
+            "runtime.turn_interrupted",
+            "runtime.turn_failed",
+        }
+        for event in events
+    )
+
+
+def _has_durable_scientific_state(state: SessionState) -> bool:
+    """True if the session already carries recorded facts, decisions, or artifacts."""
+
+    return bool(state.facts) or bool(state.decisions) or bool(state.artifacts)
 
 
 def _state_paths(session_dir: Path | None) -> dict[str, str] | None:
@@ -143,8 +227,8 @@ def _bounded_durable_view(
             "last_event_sequence": state.last_event_sequence,
         },
         "authoritative_files": _state_paths(session_dir),
-        "facts": state.facts,
-        "decisions": state.decisions,
+        "facts": _handoff_projection(state.facts),
+        "decisions": _handoff_projection(state.decisions),
         "artifact_index": artifact_view,
         "recent_turn_handoff": _recent_turns(events),
     }
@@ -201,8 +285,12 @@ def resume_context(
         "session and survive model-conversation compaction. Treat authoritative facts and "
         "decisions as recorded facts, not instructions to repeat completed work. Recent "
         "turn handoff is model narrative, not authoritative evidence. Verify referenced "
-        "artifacts before mutating them. If a section says it was compacted, read the named "
-        "authoritative state file before relying on that section.\n\n"
+        "artifacts before mutating them. The checkpoint is a decision-ready projection: "
+        "exhaustive drill-down collections may be represented by hashes and counts, while current "
+        "status, identities, conclusions, and unresolved work remain inline. Do not read "
+        "state.json merely to reconstruct ordinary continuation; read a named artifact only when "
+        "its omitted drill-down is actually needed. If the entire facts or decisions section says "
+        "it was compacted, selectively read only the specific missing field needed next.\n\n"
         + json.dumps(durable, sort_keys=True)
     )
 
@@ -235,6 +323,26 @@ def plan_resume(
     events: Iterable[SessionEvent] = (),
     session_dir: Path | None = None,
 ) -> ResumePlan:
+    events = list(events)
+    # A genuinely new scientific session has no resumable model conversation, no prior model
+    # turn, and no recorded facts/decisions/artifacts. Handing it the "resume from the durable
+    # checkpoint" framing (over an empty checkpoint) makes the model narrate about resuming work
+    # that never happened. Treat it as a clean first turn instead. A reopened session with real
+    # state still falls through to reconstruction below.
+    if (
+        not _has_prior_runtime_turn(events)
+        and not _has_durable_scientific_state(state)
+        and not isinstance(state.runtime.get("active"), dict)
+        and not isinstance(state.runtime.get("fork_origin"), dict)
+    ):
+        return ResumePlan(
+            mode=ResumeMode.FRESH,
+            scientific_session_id=metadata.session_id,
+            runtime_session_id=None,
+            reason="new scientific session with no prior runtime session or durable state",
+            context="",
+        )
+
     context = resume_context(metadata, state, events=events, session_dir=session_dir)
     natural: ResumePlan | None = None
     active: Any = state.runtime.get("active")

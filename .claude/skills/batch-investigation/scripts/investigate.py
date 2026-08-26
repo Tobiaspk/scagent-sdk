@@ -5,13 +5,15 @@ it finds sample-enriched cluster regions, characterizes each with a within-sampl
 (that cluster versus the rest of its OWN batch, holding batch constant), matches the same population
 across batches by shared **discriminating** identity genes, compares matched regions directly, and
 flags any sample-associated program that recurs across >=2 distinct populations. Composition,
-Cramer's V, neighborhood mixing, and per-batch QC are retained only as advisory context. The verdict
-is two independent axes — gene evidence x experimental design — and a deterministic, non-binding
-recommendation. The DE test is scanpy's in-environment Wilcoxon rank test.
+cluster-vs-sample agreement (ARI + NMI), neighborhood mixing, and per-batch QC are retained only as
+advisory context — they locate where samples separate, never why. The verdict is two independent
+axes — gene evidence x experimental design — and a deterministic, non-binding recommendation, plus a
+plain-language interpretation built entirely from the evidence (no assumed biology). The DE test is
+scanpy's in-environment Wilcoxon rank test.
 
-`decide_batch_handling` (``run_decision``) consumes a current evidence id after the model has
-inspected the evidence and records the handling decision. It validates the decision against the
-recommendation and never lets integration proceed silently against the evidence or without a basis.
+`decide_batch_handling` (``run_decision``) consumes a current evidence id after the user chooses and
+records only the choice and a concise rationale. The scientific detail remains in the evidence
+artifact instead of being duplicated into durable state.
 
 Pure classifiers live at module scope for unit testing without Scanpy.
 """
@@ -27,9 +29,6 @@ from typing import Any
 
 BATCH_EVIDENCE_SCHEMA = 1
 DE_ENGINE = "scanpy_wilcoxon"
-# Version of the decision-authorization policy applied by ``run_decision``. Decisions record it so
-# a floor can refuse decisions validated under an older, weaker policy.
-DECISION_POLICY_VERSION = 1
 
 # --- versioned gene classification (shared vocabulary with cluster QC) -------
 GENE_CLASS_VERSION = "batch-gene-class-v1"
@@ -175,6 +174,57 @@ def match_regions(
     }
 
 
+def nominate_cross_sample_pairs(
+    keys: list[tuple[str, str]],
+    mean_matrix: Any,
+    genes: list[str],
+    *,
+    min_corr: float = 0.4,
+    n_top_variable: int = 2000,
+) -> list[dict[str, Any]]:
+    """Nominate likely same-population regions cheaply, before any DEG tests.
+
+    This is the legacy search strategy: Pearson correlation over the most variable non-nuisance
+    mean-expression features. The expensive within-sample Wilcoxon tests are reserved for the
+    highest-correlation cross-sample candidates and used only to confirm identity.
+    """
+    import numpy as np
+
+    matrix = np.asarray(mean_matrix, dtype=float)
+    if matrix.ndim != 2 or matrix.shape[0] < 2:
+        return []
+    keep = np.array([gene_class(gene) != "nuisance" for gene in genes], dtype=bool)
+    if keep.any():
+        matrix = matrix[:, keep]
+    variance = matrix.var(axis=0)
+    informative = np.flatnonzero(variance > 1e-8)
+    if informative.size < 2:
+        return []
+    top = informative[np.argsort(variance[informative])[::-1][:n_top_variable]]
+    corr = np.corrcoef(matrix[:, top])
+    pairs: list[dict[str, Any]] = []
+    for i, (cluster_a, batch_a) in enumerate(keys):
+        for j in range(i + 1, len(keys)):
+            cluster_b, batch_b = keys[j]
+            if batch_a == batch_b:
+                continue
+            value = float(corr[i, j])
+            if math.isfinite(value) and value >= min_corr:
+                pairs.append(
+                    {
+                        "index_a": i,
+                        "index_b": j,
+                        "cluster_a": cluster_a,
+                        "batch_a": batch_a,
+                        "cluster_b": cluster_b,
+                        "batch_b": batch_b,
+                        "profile_correlation": value,
+                    }
+                )
+    pairs.sort(key=lambda pair: pair["profile_correlation"], reverse=True)
+    return pairs
+
+
 def summarize_recurrence(
     direct_rows: list[dict[str, Any]], *, min_populations: int = 2
 ) -> list[dict[str, Any]]:
@@ -182,22 +232,35 @@ def summarize_recurrence(
 
     Order-invariant: the result depends only on the set of (gene, batch, population) facts.
     """
-    seen: dict[tuple[str, str], set[Any]] = {}
+    seen: dict[tuple[str, str], dict[str, Any]] = {}
     for row in direct_rows:
-        seen.setdefault((str(row["gene"]), str(row["higher_in_batch"])), set()).add(
-            row["population"]
+        slot = seen.setdefault(
+            (str(row["gene"]), str(row["higher_in_batch"])),
+            {"populations": set(), "effects": []},
         )
+        slot["populations"].add(row["population"])
+        slot["effects"].append(abs(float(row.get("logfoldchange", 0.0))))
     recurring = [
         {
             "gene": gene,
             "higher_in_batch": batch,
-            "n_populations": len(pops),
-            "populations": sorted(map(str, pops)),
+            "n_populations": len(slot["populations"]),
+            "populations": sorted(map(str, slot["populations"])),
+            "mean_abs_logfoldchange": (
+                sum(slot["effects"]) / len(slot["effects"]) if slot["effects"] else 0.0
+            ),
         }
-        for (gene, batch), pops in seen.items()
-        if len(pops) >= min_populations
+        for (gene, batch), slot in seen.items()
+        if len(slot["populations"]) >= min_populations
     ]
-    recurring.sort(key=lambda r: (-r["n_populations"], r["gene"], r["higher_in_batch"]))
+    recurring.sort(
+        key=lambda r: (
+            -r["n_populations"],
+            -r["mean_abs_logfoldchange"],
+            r["gene"],
+            r["higher_in_batch"],
+        )
+    )
     return recurring
 
 
@@ -210,94 +273,335 @@ def classify_gene_evidence(n_matched_with_diffs: int, n_recurring_populations: i
     return "none"
 
 
-def classify_design(
-    *, confounded_columns: list[str], technical_documented: bool, has_orthogonal_condition: bool
-) -> str:
-    """design_interpretation axis. Confounding takes priority over documented-technical status.
-
-    Perfect biological confounding is never silently reclassified as technical: even when a batch is
-    documented technical, a confounded design stays ``confounded_with_biology`` (so the
-    recommendation is cannot-determine and integration requires an explicit override).
-    """
+def classify_design(*, confounded_columns: list[str], has_orthogonal_condition: bool) -> str:
+    """Summarize only what supplied condition columns establish about the design."""
     if confounded_columns:
         return "confounded_with_biology"
-    if technical_documented:
-        return "documented_technical_batch"
     if has_orthogonal_condition:
         return "orthogonal_but_not_known_technical"
     return "unknown"
 
 
 def recommend(gene_evidence: str, design_interpretation: str) -> str:
-    """Deterministic, non-binding recommendation.
-
-    Only a recurring program together with a documented technical batch yields support.
-    """
+    """Return a conservative, non-binding recommendation from the observed evidence."""
     if gene_evidence in ("none", "localized"):
         return "do_not_integrate_based_on_current_evidence"
-    if design_interpretation == "documented_technical_batch":
-        return "integration_supported"
     if design_interpretation == "orthogonal_but_not_known_technical":
         return "integration_optional_for_confirmed_replicates"
     return "cannot_determine_technical_vs_biological"
 
 
-def validate_decision(
-    decision: str, recommendation: str, integration_basis: str | None, override_warning: str | None
-) -> dict[str, Any]:
-    """Gate a submitted decision. Non-integration decisions are always allowed (conservative).
+# --- plain-language translation (no jargon reaches the reader or the model) ---
+# Every enum the verdict produces has a plain-English translation. The narrative below is built
+# entirely from the evidence — no hardcoded biology, every gene name comes from the results — so
+# the model reads a grounded finding instead of inventing a disease, tissue, or study design it
+# was never given. Wording mirrors the legacy gene-first diagnostic.
+GENE_EVIDENCE_PLAIN = {
+    "none": "no sample-linked expression differences were established",
+    "localized": (
+        "sample-linked differences turned up in individual cell populations but did not repeat "
+        "across the dataset"
+    ),
+    "recurring_sample_associated": (
+        "the same sample-linked expression shift showed up in several different cell populations — "
+        "a pattern that spans the dataset rather than one cell type"
+    ),
+}
+DESIGN_PLAIN = {
+    "unknown": (
+        "no experimental-design information was provided, so we cannot tell whether the samples "
+        "are meant to be comparable replicates or are different patients/conditions"
+    ),
+    "confounded_with_biology": (
+        "each sample lines up with one biological condition, so technical and biological "
+        "differences cannot be told apart"
+    ),
+    "orthogonal_but_not_known_technical": (
+        "a condition label exists and is not redundant with sample, but that alone does not make "
+        "the differences technical (per-donor biology can remain)"
+    ),
+}
+VERDICT_PLAIN = {
+    "cannot_determine_technical_vs_biological": (
+        "the technical-versus-biological origin of these differences cannot be determined from the "
+        "genes alone, so the dataset should not be integrated automatically"
+    ),
+    "do_not_integrate_based_on_current_evidence": (
+        "the current gene evidence does not justify integrating the dataset"
+    ),
+    "integration_optional_for_confirmed_replicates": (
+        "integration may be reasonable only if the samples are intended as comparable replicates"
+    ),
+}
+SUGGESTION_PLAIN = {
+    "do_not_integrate_based_on_current_evidence": (
+        "Based on this dataset, we did not find clear evidence that batch integration is required. "
+        "It is reasonable to proceed without integrating; revisit only if you have a specific "
+        "reason to expect a technical batch effect."
+    ),
+    "cannot_determine_technical_vs_biological": (
+        "Based on the genes alone there is no clear evidence that this dataset must be integrated. "
+        "We did see sample-linked differences, but they are equally consistent with a technical "
+        "batch or with real differences between the samples, and without design information we "
+        "cannot tell which. Before integrating, confirm whether these samples are meant to be "
+        "comparable replicates — if they are, integration is reasonable; if they are different "
+        "patients or conditions, integrating risks erasing real biology."
+    ),
+    "integration_optional_for_confirmed_replicates": (
+        "There is no clear evidence forcing integration. The sample-linked differences recur "
+        "across the dataset and the condition metadata is not confounded with sample, so "
+        "integration is reasonable IF these samples are intended as comparable replicates — "
+        "otherwise it may remove real per-sample biology."
+    ),
+}
 
-    Integration always requires an explicit basis, is permitted directly only when the
-    recommendation supports it, and otherwise needs an explicit override warning — never
-    silent against the evidence.
+
+def cluster_batch_concordance(batch_labels: Any, cluster_labels: Any) -> dict[str, Any]:
+    """Advisory global agreement between the clustering and the sample labels (ARI + NMI).
+
+    ARI and NMI compress how strongly the uncorrected clusters line up with sample identity: ~0
+    means samples are blended across clusters (well mixed); high means clusters largely correspond
+    to individual samples. A high value is NOT proof of a technical batch effect — donor/patient
+    biology (donor-specific epithelial states, genetic background, malignant clones) also drives
+    clusters to track sample. It is advisory only; the gene evidence and the design decide, and the
+    tissue must never be assumed (do not assume a tumor).
     """
-    if decision != "integrate":
-        return {"ok": True, "violation": None}
-    if integration_basis not in (
-        "documented_technical_batch",
-        "user_authorized_comparable_replicates",
-    ):
-        return {
-            "ok": False,
-            "violation": "integrate requires integration_basis (documented_technical_batch or "
-            "user_authorized_comparable_replicates)",
-        }
-    if recommendation == "integration_supported":
-        return {"ok": True, "violation": None}
-    if (
-        recommendation == "integration_optional_for_confirmed_replicates"
-        and integration_basis == "user_authorized_comparable_replicates"
-    ):
-        return {"ok": True, "violation": None}
-    if override_warning:
-        return {"ok": True, "violation": None}
+    from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score
+
+    ari = float(adjusted_rand_score(batch_labels, cluster_labels))
+    nmi = float(normalized_mutual_info_score(batch_labels, cluster_labels))
+    if ari >= 0.5 or nmi >= 0.5:
+        interpretation = "clusters largely correspond to individual samples"
+    elif ari >= 0.2 or nmi >= 0.2:
+        interpretation = "clusters partly track sample labels"
+    else:
+        interpretation = "clusters are largely independent of sample (well mixed)"
     return {
-        "ok": False,
-        "violation": f"recommendation {recommendation!r} does not support integration; provide an "
-        "explicit override_warning to proceed",
+        "ari": round(ari, 4),
+        "nmi": round(nmi, 4),
+        "tracks_sample": bool(ari >= 0.2 or nmi >= 0.2),
+        "interpretation": interpretation,
     }
 
 
-def validate_integration_basis(
-    integration_basis: str | None, evidence: dict[str, Any]
-) -> dict[str, Any]:
-    """A ``documented_technical_batch`` basis must be backed by the evidence itself.
+def _mixing_plain(concordance: dict[str, Any] | None, mixing: dict[str, Any] | None) -> str:
+    """Plain paragraph on where samples separate (ARI/NMI + neighborhood mixing).
 
-    The model cannot assert a documented technical batch at decision time: the claim has to be
-    present in the evidence object (``technical_batch_documented`` with a non-empty basis), which
-    in turn required a real basis string when the evidence was produced.
+    Framed as necessary-but-not-sufficient: a technical batch and real biology push these numbers
+    the same way, so they locate separation but never explain it.
     """
-    if integration_basis != "documented_technical_batch":
-        return {"ok": True, "violation": None}
-    documented = bool(evidence.get("technical_batch_documented"))
-    basis = evidence.get("technical_batch_basis")
-    if documented and isinstance(basis, str) and basis.strip():
-        return {"ok": True, "violation": None}
-    return {
-        "ok": False,
-        "violation": "integration_basis='documented_technical_batch' requires evidence recorded "
-        "with technical_batch_documented=true and a non-empty technical_batch_basis",
-    }
+    if not concordance:
+        return (
+            "First, how the samples sit in the data: the mixing metrics were not available "
+            "for this run."
+        )
+    interp = str(concordance.get("interpretation", "")).capitalize()
+    sent = (
+        f"First, how the samples sit together in the data. {interp} (cluster-vs-sample agreement "
+        f"ARI = {concordance.get('ari')}, NMI = {concordance.get('nmi')}; 0 means samples are "
+        "fully blended across clusters, and higher values mean clusters increasingly correspond "
+        "to individual samples)."
+    )
+    if mixing and mixing.get("status") == "complete":
+        same = mixing.get("mean_same_batch_neighbor_fraction")
+        rand = mixing.get("random_composition_same_batch_fraction")
+        if same is not None:
+            mixed_word = (
+                "tending to sit next to cells from their own sample"
+                if rand is None or float(same) > 1.5 * float(rand)
+                else "fairly well mixed across samples"
+            )
+            sent += (
+                f" Looking cell by cell, a typical cell's nearest neighbours were {mixed_word} "
+                f"({round(float(same) * 100)}% of neighbours came from the same sample, versus "
+                f"{round(float(rand) * 100)}% expected if samples were blended)."
+                if rand is not None
+                else f" Looking cell by cell, a typical cell's neighbours were {mixed_word}."
+            )
+    sent += (
+        " These numbers only tell us WHERE samples separate, never WHY: a genuine biological "
+        "difference between samples and a technical batch effect push them in exactly the same "
+        "direction, so on their own they cannot decide whether to correct anything. That is why "
+        "the rest of the check looks directly at genes."
+    )
+    return sent
+
+
+def build_plain_interpretation(
+    *,
+    batch_key: str,
+    n_regions: int,
+    pairs: list[dict[str, Any]],
+    recurring_by_sample: dict[str, list[str]],
+    gene_evidence: str,
+    design_interpretation: str,
+    recommendation: str,
+    concordance: dict[str, Any] | None = None,
+    mixing: dict[str, Any] | None = None,
+) -> str:
+    """Readable plain-language walkthrough of the results, built only from the evidence.
+
+    No hardcoded biology: every gene, cluster, and sample name comes from ``pairs`` /
+    ``recurring_by_sample``. It walks the reader through what was done in order (where samples
+    separate, then the gene work), names the populations and genes involved, points at the file
+    that holds each piece of evidence, and ends with a plain bottom line and a concrete suggestion.
+    Internal enum values are never shown — only their plain-language translations.
+    """
+    paras: list[str] = [
+        "This check asks one question: do the differences between samples look like a technical "
+        "batch effect that should be corrected, or like real biology that should be left alone? "
+        "It answers in two stages — a quick look at how the samples sit in the data, then a "
+        "gene-level investigation.",
+        _mixing_plain(concordance, mixing),
+        (
+            "Next, the genes. Looking at each cell type in each sample, the check found "
+            f"{n_regions} cluster-and-sample regions that held far more of one sample than its "
+            "size would predict (`sample-enriched-regions.csv`) and then examined "
+            f"{len(pairs)} cross-sample pair(s) that looked like the same cell type "
+            "(`population-matches.csv`). For each pair it identified the cell type from within a "
+            f"single sample — comparing the cluster against the rest of that same sample so "
+            f"{batch_key} is held constant (`within-sample-identity-degs.csv`) — and then compared "
+            "the two samples' versions of it head to head (`direct-matched-region-degs.csv`)."
+        ),
+    ]
+    for p in pairs:
+        shared = ", ".join(p.get("shared_genes", [])[:8]) or "shared identity genes"
+        sent = (
+            f"Cluster {p['cluster_a']} in {p['batch_a']} and cluster {p['cluster_b']} in "
+            f"{p['batch_b']} share {len(p.get('shared_genes', []))} of their top identity genes "
+            f"({shared}), so they look like the same cell type present in both samples."
+        )
+        hi_a = ", ".join(p.get("higher_in_a", [])[:6])
+        hi_b = ", ".join(p.get("higher_in_b", [])[:6])
+        if hi_a or hi_b:
+            sent += (
+                f" Comparing that cell type across the two samples directly, {p['batch_a']} is "
+                f"higher for {hi_a or 'n/a'}, while {p['batch_b']} is higher for {hi_b or 'n/a'}. "
+                "This describes how the two versions differ; it does not, by itself, show the "
+                "difference is technical rather than real."
+            )
+        paras.append(sent)
+    if recurring_by_sample:
+        bits = [
+            f"in {sample} ({', '.join(genes[:8])})"
+            for sample, genes in recurring_by_sample.items()
+        ]
+        paras.append(
+            "Crucially, the same sample-linked shift shows up in more than one cell type — the "
+            "same genes are consistently higher " + "; ".join(bits) + ". A shift that repeats "
+            "across several cell types is a dataset-wide, sample-linked pattern rather than a "
+            "one-off. But dataset-wide still is not the same as technical: a real, systemic "
+            "biological difference between samples (a different patient, treatment, or tissue "
+            "state) would produce exactly this picture too."
+        )
+    elif pairs:
+        paras.append(
+            "This sample-linked difference did not repeat across other cell types, so it looks "
+            "localized to a few populations rather than being a dataset-wide pattern."
+        )
+    paras.append(
+        f"On the study design, {DESIGN_PLAIN.get(design_interpretation, design_interpretation)}. "
+        f"In short: {GENE_EVIDENCE_PLAIN.get(gene_evidence, gene_evidence)}; and "
+        f"{VERDICT_PLAIN.get(recommendation, recommendation)}."
+    )
+    paras.append(
+        "**What we suggest.** "
+        + SUGGESTION_PLAIN.get(
+            recommendation,
+            "Weigh the gene evidence and the study design before deciding whether to integrate.",
+        )
+    )
+    paras.append(
+        "One caveat on reading the tables: the q-values rank how cleanly cells separate, not how "
+        "reproducible a difference is across samples — cells are not independent replicates. Weigh "
+        "the expression effect, the percent of cells expressing each gene, whether the pattern "
+        "recurs, and the study design, rather than the q-values alone. Do not assume a disease, "
+        "tissue, or replicate structure that the metadata does not state."
+    )
+    return "\n\n".join(paras)
+
+
+def build_terminal_summary(
+    *,
+    batch_key: str,
+    n_regions: int,
+    supported_pairs: list[dict[str, Any]],
+    recurring: list[dict[str, Any]],
+    gene_evidence: str,
+    design_interpretation: str,
+    recommendation: str,
+    concordance: dict[str, Any],
+    mixing: dict[str, Any] | None,
+) -> str:
+    """Compact legacy-shaped reasoning surface for the next model step.
+
+    Full tables and the long explanation remain artifacts. The inline result names the decisive
+    observations and their logic so the model can reason from evidence without rereading a large
+    deterministic essay into every reconstructed context.
+    """
+
+    lines = [
+        f"Batch investigation complete for `{batch_key}`.",
+        "",
+        f"Verdict: {GENE_EVIDENCE_PLAIN.get(gene_evidence, gene_evidence)}; "
+        f"{DESIGN_PLAIN.get(design_interpretation, design_interpretation)}.",
+        "",
+        "Evidence:",
+        f"- {n_regions} sample-enriched cluster regions; {len(supported_pairs)} cross-sample "
+        "pairs share a within-sample discriminating identity signature.",
+    ]
+    if supported_pairs:
+        top = max(
+            supported_pairs,
+            key=lambda pair: (
+                float(pair.get("profile_correlation", 0.0)),
+                float(pair.get("signature_similarity", 0.0)),
+                len(pair.get("shared_genes", [])),
+            ),
+        )
+        shared = ", ".join(top.get("shared_genes", [])[:8]) or "none listed"
+        lines.append(
+            f"- Strongest identity pair: cluster {top['cluster_a']} in {top['batch_a']} vs "
+            f"cluster {top['cluster_b']} in {top['batch_b']}; signature similarity "
+            f"{float(top.get('signature_similarity', 0.0)):.2f} after profile correlation "
+            f"{float(top.get('profile_correlation', 0.0)):.2f}; shared genes: {shared}. "
+            "Because each signature was derived against the rest of its own sample, this is "
+            "evidence that sample-associated clusters may represent the same population split "
+            "across samples."
+        )
+    if recurring:
+        top_programs = ", ".join(
+            f"{row['gene']} higher in {row['higher_in_batch']} across {row['n_populations']} "
+            "populations"
+            for row in recurring[:5]
+        )
+        lines.append(f"- Recurring sample-associated programs: {top_programs}.")
+    else:
+        lines.append("- No gene shift recurred across two or more matched populations.")
+    lines.append(
+        f"- Cluster/sample agreement: ARI {concordance.get('ari')}, NMI "
+        f"{concordance.get('nmi')} (separation location only, not cause)."
+    )
+    if isinstance(mixing, dict) and mixing.get("status") == "complete":
+        lines.append(
+            "- Mean same-sample neighbor fraction "
+            f"{float(mixing.get('mean_same_batch_neighbor_fraction', 0.0)):.1%} vs "
+            f"{float(mixing.get('random_composition_same_batch_fraction', 0.0)):.1%} expected "
+            "from composition (advisory only)."
+        )
+    lines.extend(
+        [
+            "",
+            f"Recommendation: {SUGGESTION_PLAIN.get(recommendation, recommendation)}",
+            "",
+            "Decision checkpoint: explain the strongest identity pair, the recurring-program "
+            "evidence, and the design limitation to the user. Ask whether to integrate with "
+            "scVI, keep the uncorrected representation, analyze samples separately, or provide "
+            "missing design context. Do not record a batch-handling decision until the user "
+            "chooses.",
+        ]
+    )
+    return "\n".join(lines)
 
 
 LEGEND_CARDINALITY_LIMIT = 12
@@ -439,6 +743,11 @@ def _region_markers(
     if n_target < 3 or n_rest < 3:
         return {"discriminating_genes": [], "records": [], "n_target": n_target, "n_rest": n_rest}
     sub = sub.copy()
+    # Identity DEG is about what the cell type IS: genes seen in only a handful of cells cannot be
+    # identity markers and only slow the Wilcoxon test. Dropping them mirrors legacy (which filtered
+    # low-detection genes before DE) and typically halves the gene count on sparse data. The
+    # direct cross-sample comparison deliberately keeps ALL genes and is untouched by this.
+    sc.pp.filter_genes(sub, min_cells=3)
     sub.obs["_grp"] = np.where(target_mask, "target", "rest")
     sc.tl.rank_genes_groups(
         sub, "_grp", groups=["target"], reference="rest", method="wilcoxon", pts=True
@@ -474,20 +783,100 @@ def _region_markers(
     }
 
 
-def _union_find_components(
-    region_keys: list[tuple[str, str]], edges: list[tuple[int, int]]
-) -> dict[tuple[str, str], int]:
-    parent = list(range(len(region_keys)))
+def _mean_vector(matrix: Any) -> Any:
+    import numpy as np
 
-    def find(i: int) -> int:
-        while parent[i] != i:
-            parent[i] = parent[parent[i]]
-            i = parent[i]
-        return i
+    value = matrix.mean(axis=0)
+    return np.asarray(value.A1 if hasattr(value, "A1") else value).ravel()
 
-    for a, b in edges:
-        parent[find(a)] = find(b)
-    return {region_keys[i]: find(i) for i in range(len(region_keys))}
+
+def _region_mean_profiles(
+    adata: Any,
+    regions: list[dict[str, Any]],
+    batch: Any,
+    cluster: Any,
+    np: Any,
+) -> tuple[list[tuple[str, str]], Any]:
+    """Return one cheap whole-transcriptome mean profile per enriched region."""
+    keys: list[tuple[str, str]] = []
+    profiles: list[Any] = []
+    batch_values = batch.to_numpy()
+    cluster_values = cluster.to_numpy()
+    for region in regions:
+        mask = (batch_values == region["batch"]) & (cluster_values == region["cluster"])
+        if not bool(mask.any()):
+            continue
+        keys.append((region["cluster"], region["batch"]))
+        profiles.append(_mean_vector(adata.X[mask]))
+    matrix = np.vstack(profiles) if profiles else np.zeros((0, adata.n_vars), dtype=float)
+    return keys, matrix
+
+
+def _region_recurrence_rows(
+    adata: Any,
+    regions: list[dict[str, Any]],
+    batch: Any,
+    cluster: Any,
+    *,
+    min_cells: int,
+    min_effect: float,
+    top_n: int,
+    np: Any,
+) -> list[dict[str, Any]]:
+    """Cheap deterministic recurrence scan over co-clustered sample-enriched regions.
+
+    Holding cluster constant, rank genes by the mean-expression shift for one sample versus all
+    other samples. This preserves legacy's second recurrence geometry without launching one full
+    Scanpy Wilcoxon job per enriched region. Direct Wilcoxon tests remain the inferential support
+    for the three confirmed split-population pairs.
+    """
+    rows: list[dict[str, Any]] = []
+    batch_values = batch.to_numpy()
+    cluster_values = cluster.to_numpy()
+    genes = np.asarray(adata.var_names.astype(str))
+    for region in sorted(regions, key=lambda r: (r["cluster"], r["batch"])):
+        in_cluster = cluster_values == region["cluster"]
+        target = in_cluster & (batch_values == region["batch"])
+        reference = in_cluster & (batch_values != region["batch"])
+        if int(target.sum()) < min_cells or int(reference.sum()) < min_cells:
+            continue
+        effect = _mean_vector(adata.X[target]) - _mean_vector(adata.X[reference])
+        eligible = np.flatnonzero(effect >= min_effect)
+        if eligible.size == 0:
+            continue
+        ranked = eligible[np.argsort(effect[eligible])[::-1][:top_n]]
+        for position in ranked:
+            gene = str(genes[position])
+            rows.append(
+                {
+                    "population": f"cluster:{region['cluster']}",
+                    "gene": gene,
+                    "gene_class": gene_class(gene),
+                    "higher_in_batch": region["batch"],
+                    "logfoldchange": float(effect[position]),
+                    "source": "within_cluster_mean_shift",
+                }
+            )
+    return rows
+
+
+def compact_evidence(evidence: dict[str, Any]) -> dict[str, Any]:
+    """Keep only the decision-ready evidence pointer in durable state."""
+
+    keys = (
+        "schema_version",
+        "status",
+        "evidence_id",
+        "batch_key",
+        "cluster_key",
+        "gene_evidence",
+        "design_interpretation",
+        "recommendation",
+        "artifact_path",
+        "cell_set_id",
+        "count_representation_id",
+    )
+    return {key: evidence[key] for key in keys if key in evidence}
 
 
 def run_evidence(arguments: dict[str, Any], context: Any) -> dict[str, Any]:  # noqa: C901
@@ -503,26 +892,22 @@ def run_evidence(arguments: dict[str, Any], context: Any) -> dict[str, Any]:  # 
     batch_key = arguments.get("batch_key")
     cluster_key = str(arguments.get("cluster_key", "leiden"))
     condition_keys = [str(k) for k in arguments.get("condition_keys", [])]
-    technical_documented = bool(arguments.get("technical_batch_documented", False))
-    technical_basis = arguments.get("technical_batch_basis")
     min_cells_region = int(arguments.get("min_cells_per_region", 30))
     min_enrichment = float(arguments.get("min_enrichment", 2.0))
-    n_identity_genes = int(arguments.get("n_identity_genes", 25))
+    n_identity_genes = int(arguments.get("n_identity_genes", 50))
     max_regions = int(arguments.get("max_regions", 40))
-    max_candidate_pairs = int(arguments.get("max_candidate_pairs", 60))
-    min_shared = int(arguments.get("min_shared_identity_genes", 3))
-    min_jaccard = float(arguments.get("min_match_jaccard", 0.15))
+    max_candidate_pairs = int(arguments.get("max_candidate_pairs", 3))
+    max_match_attempts = int(arguments.get("max_match_attempts", 10))
+    min_profile_correlation = float(arguments.get("min_profile_correlation", 0.4))
+    n_profile_genes = int(arguments.get("n_profile_genes", 2000))
+    min_shared = int(arguments.get("min_shared_identity_genes", 5))
+    min_jaccard = float(arguments.get("min_match_jaccard", 0.0))
     n_neighbors = int(arguments.get("n_neighbors_for_mixing", 30))
     max_cells = int(arguments.get("max_cells_for_mixing", 20000))
     min_lfc = float(arguments.get("min_logfoldchange", 0.5))
     max_padj = float(arguments.get("max_adjusted_pvalue", 0.05))
     min_frac_diff = float(arguments.get("min_fraction_difference", 0.1))
     seed = int(arguments.get("random_seed", 0))
-    if technical_documented and not (isinstance(technical_basis, str) and technical_basis.strip()):
-        raise ValueError(
-            "technical_batch_documented=true requires a non-empty technical_batch_basis"
-        )
-
     effective_parameters = {
         "cluster_key": cluster_key,
         "condition_keys": sorted(condition_keys),
@@ -531,6 +916,9 @@ def run_evidence(arguments: dict[str, Any], context: Any) -> dict[str, Any]:  # 
         "n_identity_genes": n_identity_genes,
         "max_regions": max_regions,
         "max_candidate_pairs": max_candidate_pairs,
+        "max_match_attempts": max_match_attempts,
+        "min_profile_correlation": min_profile_correlation,
+        "n_profile_genes": n_profile_genes,
         "min_shared_identity_genes": min_shared,
         "min_match_jaccard": min_jaccard,
         "min_logfoldchange": min_lfc,
@@ -556,12 +944,11 @@ def run_evidence(arguments: dict[str, Any], context: Any) -> dict[str, Any]:  # 
             "design_interpretation": "unknown",
             "recommendation": "not_applicable",
             "de_engine": DE_ENGINE,
-            "technical_batch_documented": technical_documented,
-            "technical_batch_basis": technical_basis,
             "effective_parameters": effective_parameters,
             **ident,
         }
         evidence["evidence_id"] = _identity("batch-evidence", evidence)
+        evidence_fact = compact_evidence(evidence)
         (context.staging_dir / "batch-investigation.md").write_text(
             "# Batch investigation\n\nNo meaningful batch key was selected; recorded "
             "`not_applicable` bound to the current analysis identities.\n",
@@ -569,10 +956,10 @@ def run_evidence(arguments: dict[str, Any], context: Any) -> dict[str, Any]:  # 
         )
         return {
             "summary": "Recorded not-applicable batch evidence for the input artifact identities.",
-            "details": evidence,
+            "details": evidence_fact,
             "facts_patch": {
                 "analysis": analysis_patch,
-                "batch": {"evidence": evidence, "decision": None},
+                "batch": {"evidence": evidence_fact, "decision": None},
             },
             "artifacts": [
                 {
@@ -645,17 +1032,18 @@ def run_evidence(arguments: dict[str, Any], context: Any) -> dict[str, Any]:  # 
         neighbor_idx = nn.kneighbors(return_distance=False)[:, 1:]
         neighbor_batches = sampled_batch[neighbor_idx]
         same = (neighbor_batches == sampled_batch[:, None]).mean(axis=1)
+        # Vectorized normalized neighborhood entropy: map labels to codes once, count per row with
+        # a small loop over batch levels (not a pandas Series per cell), then Shannon-normalize.
         levels = sorted(map(str, batch.unique()))
-        entropies = [
-            float(
-                -(
-                    pd.Series(v).value_counts(normalize=True)
-                    * pd.Series(v).value_counts(normalize=True).map(math.log)
-                ).sum()
-            )
-            / math.log(len(levels))
-            for v in neighbor_batches
-        ]
+        code = {lv: i for i, lv in enumerate(levels)}
+        sampled_codes = np.array([code[str(b)] for b in sampled_batch])
+        nb_codes = sampled_codes[neighbor_idx]
+        counts = np.stack([(nb_codes == c).sum(axis=1) for c in range(len(levels))], axis=1)
+        probs = counts / counts.sum(axis=1, keepdims=True)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            terms = np.where(probs > 0, probs * np.log(probs), 0.0)
+        norm = math.log(len(levels)) if len(levels) > 1 else 1.0
+        entropies = -terms.sum(axis=1) / norm
         freq = batch.value_counts(normalize=True)
         mixing = {
             "status": "complete",
@@ -665,6 +1053,12 @@ def run_evidence(arguments: dict[str, Any], context: Any) -> dict[str, Any]:  # 
             "mean_normalized_batch_entropy": float(np.mean(entropies)),
             "caution": "Descriptive mixing; not an integration objective.",
         }
+
+    # Advisory global concordance (ARI + NMI) — legacy-style "where do samples separate" signal.
+    # Necessary-but-not-sufficient: never drives the verdict, only frames the plain-language report.
+    concordance = cluster_batch_concordance(
+        batch.astype(str).to_numpy(), cluster.astype(str).to_numpy()
+    )
 
     # --- stage 1: sample-enriched regions -----------------------------------
     global_freq = batch.value_counts(normalize=True).to_dict()
@@ -699,9 +1093,32 @@ def run_evidence(arguments: dict[str, Any], context: Any) -> dict[str, Any]:  # 
         ]
     ).to_csv(context.staging_dir / "sample-enriched-regions.csv", index=False)
 
-    # --- stage 2: within-sample identity DEGs (batch held constant) ---------
+    # --- stage 2: cheap candidate nomination, then lazy identity DEGs --------
+    # Legacy's key performance property is that DEG is confirmation, not search. Whole-expression
+    # region profiles nominate likely same-population pairs in milliseconds; expensive Wilcoxon
+    # runs are then bounded by ``max_match_attempts`` and stop after enough confirmed pairs.
+    region_keys, profiles = _region_mean_profiles(adata, regions, batch, cluster, np)
+    region_by_key = {(region["cluster"], region["batch"]): region for region in regions}
+    candidates = nominate_cross_sample_pairs(
+        region_keys,
+        profiles,
+        list(map(str, adata.var_names)),
+        min_corr=min_profile_correlation,
+        n_top_variable=n_profile_genes,
+    )
+    candidate_correlations = {
+        (int(candidate["index_a"]), int(candidate["index_b"])): float(
+            candidate["profile_correlation"]
+        )
+        for candidate in candidates
+    }
     within_rows: list[dict[str, Any]] = []
-    for region in regions:
+    marker_cache: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def markers_for(key: tuple[str, str]) -> dict[str, Any]:
+        if key in marker_cache:
+            return marker_cache[key]
+        region = region_by_key[key]
         sub = adata[batch.to_numpy() == region["batch"]]
         target = cluster[batch == region["batch"]].to_numpy() == region["cluster"]
         markers = _region_markers(
@@ -717,49 +1134,58 @@ def run_evidence(arguments: dict[str, Any], context: Any) -> dict[str, Any]:  # 
         region["discriminating_genes"] = markers["discriminating_genes"]
         for record in markers["records"]:
             within_rows.append({"cluster": region["cluster"], "batch": region["batch"], **record})
+        marker_cache[key] = markers
+        return markers
+
+    match_rows: list[dict[str, Any]] = []
+    supported_edges: list[tuple[int, int, int, float]] = []
+    selected_regions: set[tuple[str, str]] = set()
+    attempts = 0
+    for candidate in candidates:
+        if len(supported_edges) >= max_candidate_pairs or attempts >= max_match_attempts:
+            break
+        i, j = int(candidate["index_a"]), int(candidate["index_b"])
+        key_a, key_b = region_keys[i], region_keys[j]
+        if key_a in selected_regions and key_b in selected_regions:
+            continue
+        attempts += 1
+        markers_a = markers_for(key_a)
+        markers_b = markers_for(key_b)
+        match = match_regions(
+            markers_a["discriminating_genes"],
+            markers_b["discriminating_genes"],
+            min_shared=min_shared,
+            min_jaccard=min_jaccard,
+        )
+        match_rows.append(
+            {
+                "cluster_a": key_a[0],
+                "batch_a": key_a[1],
+                "cluster_b": key_b[0],
+                "batch_b": key_b[1],
+                "profile_correlation": round(candidate["profile_correlation"], 3),
+                "shared_discriminating": match["shared"],
+                "jaccard": round(match["jaccard"], 3),
+                "signature_similarity": round(match["jaccard"], 3),
+                "shared_genes": ";".join(match["shared_genes"][:15]),
+                "identity_match_supported": match["supported"],
+                "rejection_reason": "" if match["supported"] else match["reason"],
+            }
+        )
+        if match["supported"]:
+            supported_edges.append((i, j, match["shared"], match["jaccard"]))
+            selected_regions.update((key_a, key_b))
+
     pd.DataFrame(within_rows).to_csv(
         context.staging_dir / "within-sample-identity-degs.csv", index=False
     )
-
-    # --- stage 3: cross-sample matching on discriminating genes -------------
-    region_keys = [(r["cluster"], r["batch"]) for r in regions]
-    match_rows: list[dict[str, Any]] = []
-    supported_edges: list[tuple[int, int, int]] = []
-    for i in range(len(regions)):
-        for j in range(i + 1, len(regions)):
-            if regions[i]["batch"] == regions[j]["batch"]:
-                continue
-            m = match_regions(
-                regions[i]["discriminating_genes"],
-                regions[j]["discriminating_genes"],
-                min_shared=min_shared,
-                min_jaccard=min_jaccard,
-            )
-            match_rows.append(
-                {
-                    "cluster_a": regions[i]["cluster"],
-                    "batch_a": regions[i]["batch"],
-                    "cluster_b": regions[j]["cluster"],
-                    "batch_b": regions[j]["batch"],
-                    "shared_discriminating": m["shared"],
-                    "jaccard": round(m["jaccard"], 3),
-                    "shared_genes": ";".join(m["shared_genes"][:15]),
-                    "identity_match_supported": m["supported"],
-                    "rejection_reason": "" if m["supported"] else m["reason"],
-                }
-            )
-            if m["supported"]:
-                supported_edges.append((i, j, m["shared"]))
     pd.DataFrame(match_rows).to_csv(context.staging_dir / "population-matches.csv", index=False)
-    # Bound the expensive direct-DE step: keep the strongest matches only.
-    supported_edges.sort(key=lambda e: e[2], reverse=True)
-    de_edges = [(i, j) for (i, j, _shared) in supported_edges[:max_candidate_pairs]]
-    components = _union_find_components(region_keys, [(i, j) for (i, j, _s) in supported_edges])
+    de_edges = [(i, j) for (i, j, _shared, _similarity) in supported_edges]
 
     # --- stage 4 + 5: direct matched comparison and recurrence --------------
     direct_rows: list[dict[str, Any]] = []
     for i, j in de_edges:
-        ri, rj = regions[i], regions[j]
+        ri, rj = region_by_key[region_keys[i]], region_by_key[region_keys[j]]
         mask = ((cluster == ri["cluster"]) & (batch == ri["batch"])) | (
             (cluster == rj["cluster"]) & (batch == rj["batch"])
         )
@@ -779,14 +1205,15 @@ def run_evidence(arguments: dict[str, Any], context: Any) -> dict[str, Any]:  # 
         pct_a_all = (matrix[is_a] > 0).mean(axis=0)
         pct_b_all = (matrix[~is_a] > 0).mean(axis=0)
         gene_pos = {str(name): idx for idx, name in enumerate(pair.var_names)}
-        comp = components[region_keys[i]]
         sig = frame[frame["pvals_adj"] <= max_padj]
         for _, row in sig.iterrows():
             lfc = float(row["logfoldchanges"])
             if lfc >= min_lfc:
                 higher = ri["batch"]
+                population = f"cluster:{ri['cluster']}"
             elif lfc <= -min_lfc:
                 higher = rj["batch"]
+                population = f"cluster:{rj['cluster']}"
             else:
                 continue
             # Detection fractions are recorded so the model can judge effect magnitude. NOTE: a
@@ -801,7 +1228,10 @@ def run_evidence(arguments: dict[str, Any], context: Any) -> dict[str, Any]:  # 
             pct_b = float(pct_b_all[position])
             direct_rows.append(
                 {
-                    "population": comp,
+                    # Count an actual cell population, not a synthetic connected component or
+                    # pair id. This also deduplicates a direct comparison against the same cluster
+                    # observed by the co-clustered recurrence scan.
+                    "population": population,
                     "gene": str(row["names"]),
                     "gene_class": gene_class(str(row["names"])),
                     "higher_in_batch": higher,
@@ -819,8 +1249,64 @@ def run_evidence(arguments: dict[str, Any], context: Any) -> dict[str, Any]:  # 
     pd.DataFrame(direct_rows).to_csv(
         context.staging_dir / "direct-matched-region-degs.csv", index=False
     )
-    recurring = summarize_recurrence(direct_rows)
+    recurrence_rows = _region_recurrence_rows(
+        adata,
+        regions,
+        batch,
+        cluster,
+        min_cells=min_cells_region,
+        min_effect=min_lfc,
+        top_n=25,
+        np=np,
+    )
+    recurring = summarize_recurrence(recurrence_rows + direct_rows)
     pd.DataFrame(recurring).to_csv(context.staging_dir / "recurring-programs.csv", index=False)
+
+    # Grounded matched-pair detail for the plain-language narrative (top few actually compared).
+    direct_by_pair: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
+    for r in direct_rows:
+        direct_by_pair.setdefault(
+            (r["cluster_a"], r["batch_a"], r["cluster_b"], r["batch_b"]), []
+        ).append(r)
+
+    def _side_genes(rows: list[dict[str, Any]], side_batch: str) -> list[str]:
+        picked = [x for x in rows if x["higher_in_batch"] == side_batch]
+        # Discriminating genes first, then by effect magnitude, so the narrative names real markers.
+        picked.sort(key=lambda x: (x["gene_class"] != "discriminating", -abs(x["logfoldchange"])))
+        return [x["gene"] for x in picked]
+
+    pairs_detail: list[dict[str, Any]] = []
+    for i, j in de_edges[:5]:
+        ri, rj = regions[i], regions[j]
+        shared = sorted(
+            {str(g).upper() for g in ri["discriminating_genes"]}
+            & {str(g).upper() for g in rj["discriminating_genes"]}
+        )
+        rows = direct_by_pair.get((ri["cluster"], ri["batch"], rj["cluster"], rj["batch"]), [])
+        pairs_detail.append(
+            {
+                "cluster_a": ri["cluster"],
+                "batch_a": ri["batch"],
+                "cluster_b": rj["cluster"],
+                "batch_b": rj["batch"],
+                "shared_genes": shared,
+                "signature_similarity": (
+                    len(shared)
+                    / len(
+                        {str(g).upper() for g in ri["discriminating_genes"]}
+                        | {str(g).upper() for g in rj["discriminating_genes"]}
+                    )
+                    if ri["discriminating_genes"] or rj["discriminating_genes"]
+                    else 0.0
+                ),
+                "profile_correlation": candidate_correlations.get((i, j)),
+                "higher_in_a": _side_genes(rows, ri["batch"]),
+                "higher_in_b": _side_genes(rows, rj["batch"]),
+            }
+        )
+    recurring_by_sample: dict[str, list[str]] = {}
+    for r in recurring:
+        recurring_by_sample.setdefault(str(r["higher_in_batch"]), []).append(str(r["gene"]))
 
     # --- stage 6: design / confounding --------------------------------------
     confounding_rows: list[dict[str, Any]] = []
@@ -865,14 +1351,62 @@ def run_evidence(arguments: dict[str, Any], context: Any) -> dict[str, Any]:  # 
     gene_evidence = classify_gene_evidence(n_matched_with_diffs, n_recurring_populations)
     design_interpretation = classify_design(
         confounded_columns=confounded_columns,
-        technical_documented=technical_documented,
         has_orthogonal_condition=has_orthogonal,
     )
     recommendation = recommend(gene_evidence, design_interpretation)
 
+    plain_interpretation = build_plain_interpretation(
+        batch_key=batch_key,
+        n_regions=len(regions),
+        pairs=pairs_detail,
+        recurring_by_sample=recurring_by_sample,
+        gene_evidence=gene_evidence,
+        design_interpretation=design_interpretation,
+        recommendation=recommendation,
+        concordance=concordance,
+        mixing=mixing,
+    )
+
+    supported_pair_details: list[dict[str, Any]] = []
+    for i, j, _shared_count, similarity in supported_edges:
+        ri, rj = regions[i], regions[j]
+        shared_genes = sorted(
+            {str(g).upper() for g in ri["discriminating_genes"]}
+            & {str(g).upper() for g in rj["discriminating_genes"]}
+        )
+        supported_pair_details.append(
+            {
+                "cluster_a": ri["cluster"],
+                "batch_a": ri["batch"],
+                "cluster_b": rj["cluster"],
+                "batch_b": rj["batch"],
+                "signature_similarity": similarity,
+                "profile_correlation": candidate_correlations.get((i, j)),
+                "shared_genes": shared_genes,
+            }
+        )
+
+    terminal_summary = build_terminal_summary(
+        batch_key=str(batch_key),
+        n_regions=len(regions),
+        supported_pairs=supported_pair_details,
+        recurring=recurring,
+        gene_evidence=gene_evidence,
+        design_interpretation=design_interpretation,
+        recommendation=recommendation,
+        concordance=concordance,
+        mixing=mixing,
+    )
+
     match_summary = [
-        {"a": list(region_keys[i]), "b": list(region_keys[j]), "shared": s}
-        for (i, j, s) in supported_edges
+        {
+            "a": list(region_keys[i]),
+            "b": list(region_keys[j]),
+            "shared": shared,
+            "signature_similarity": similarity,
+            "profile_correlation": candidate_correlations.get((i, j)),
+        }
+        for (i, j, shared, similarity) in supported_edges
     ]
     evidence = {
         "schema_version": BATCH_EVIDENCE_SCHEMA,
@@ -885,20 +1419,23 @@ def run_evidence(arguments: dict[str, Any], context: Any) -> dict[str, Any]:  # 
         "design_interpretation": design_interpretation,
         "recommendation": recommendation,
         "n_enriched_regions": len(regions),
+        "n_profile_candidates": len(candidates),
+        "n_match_attempts": attempts,
         "n_supported_matches": len(supported_edges),
+        "supported_identity_pairs": supported_pair_details[:20],
         "n_direct_compared_pairs": len(de_edges),
         "n_recurring_programs": len(recurring),
         "recurring_programs": recurring[:20],
         "confounding": confounding_rows,
         "confounded_columns": confounded_columns,
-        "technical_batch_documented": technical_documented,
-        "technical_batch_basis": technical_basis,
         "de_engine": DE_ENGINE,
         "gene_class_version": GENE_CLASS_VERSION,
-        "advisory": {"cramers_v": association, "mixing": mixing},
+        "plain_interpretation": plain_interpretation,
+        "terminal_summary": terminal_summary,
+        "advisory": {"concordance": concordance, "cramers_v": association, "mixing": mixing},
         "figure_mode": layout["mode"],
         "effective_parameters": effective_parameters,
-        "artifact_path": f"artifacts/capabilities/{context.execution_id}/batch-evidence.json",
+        "artifact_path": f"{context.artifact_relative_path}/batch-evidence.json",
         **ident,
     }
     evidence["evidence_id"] = _identity(
@@ -911,8 +1448,6 @@ def run_evidence(arguments: dict[str, Any], context: Any) -> dict[str, Any]:  # 
             "batch_key": batch_key,
             "identities": {k: ident[k] for k in ident},
             "effective_parameters": effective_parameters,
-            "technical_batch_documented": technical_documented,
-            "technical_batch_basis": technical_basis,
             "regions": region_keys,
             "matches": match_summary,
             "recurring": [(r["gene"], r["higher_in_batch"], r["n_populations"]) for r in recurring],
@@ -923,6 +1458,7 @@ def run_evidence(arguments: dict[str, Any], context: Any) -> dict[str, Any]:  # 
         json.dumps(evidence, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8"
     )
     _write_evidence_report(context.staging_dir / "batch-investigation.md", evidence)
+    evidence_fact = compact_evidence(evidence)
 
     artifacts = [
         {
@@ -982,15 +1518,11 @@ def run_evidence(arguments: dict[str, Any], context: Any) -> dict[str, Any]:  # 
         },
     ]
     return {
-        "summary": (
-            f"Batch evidence for {batch_key!r}: gene_evidence={gene_evidence}, "
-            f"design={design_interpretation}, recommendation={recommendation} "
-            f"({len(regions)} regions, {len(supported_edges)} matches, {len(recurring)} recurring)."
-        ),
-        "details": evidence,
+        "summary": terminal_summary,
+        "details": evidence_fact,
         "facts_patch": {
             "analysis": analysis_patch,
-            "batch": {"evidence": evidence, "decision": None},
+            "batch": {"evidence": evidence_fact, "decision": None},
         },
         "artifacts": artifacts,
         "model_media": [a for a in artifacts if a["media_type"].startswith("image/")],
@@ -998,37 +1530,94 @@ def run_evidence(arguments: dict[str, Any], context: Any) -> dict[str, Any]:  # 
 
 
 def _write_evidence_report(path: Path, evidence: dict[str, Any]) -> None:
+    """Plain-language README that reads on its own — no jargon, no assumed biology.
+
+    Structure mirrors the legacy gene-first diagnostic: a philosophy preamble, the parameters used,
+    a "What it is / How it was computed / How to read it" note per file, then a dataset-specific
+    Interpretation (built deterministically from the evidence) that ends in a concrete suggestion.
+    """
+    p = evidence.get("effective_parameters", {})
     lines = [
-        "# Batch investigation (gene-first evidence)",
+        "# Batch check — are the differences between samples technical or real biology?",
         "",
-        f"- Batch key: `{evidence['batch_key']}`",
-        f"- Gene evidence: **{evidence['gene_evidence']}**",
-        f"- Design interpretation: **{evidence['design_interpretation']}**"
-        + (
-            f" (confounded columns: {evidence.get('confounded_columns')})"
-            if evidence.get("confounded_columns")
-            else ""
-        ),
-        f"- Recommendation (non-binding): **{evidence['recommendation']}**",
-        f"- Enriched regions: {evidence['n_enriched_regions']}; supported matches: "
-        f"{evidence['n_supported_matches']}; direct pairs: "
-        f"{evidence.get('n_direct_compared_pairs')}; recurring: {evidence['n_recurring_programs']}",
-        f"- DE engine: {evidence['de_engine']}; gene-class: {evidence['gene_class_version']}",
+        "These files investigate one question: when a dataset is made of several samples, are the "
+        "differences between those samples a technical batch effect worth correcting, or real "
+        "biology that should be kept? The approach is gene-first. Rather than trusting that "
+        "samples separating in a plot means a batch effect (real biological differences separate "
+        "too), it finds the same cell type in more than one sample and reads the actual genes to "
+        "see how — and whether — that cell type differs from sample to sample. The strongest "
+        "evidence is the within-sample gene lists (they describe each cell type cleanly, with the "
+        "sample held constant); the direct cross-sample comparison and the recurrence check are "
+        "supporting detail. One limit to keep in mind: no gene table can prove a difference is "
+        "technical rather than real per-sample biology — only the experimental design can settle "
+        "that. The **Interpretation** section at the end walks through what was found here.",
         "",
-        "**Recurrence is a legacy-compatible advisory signal computed from cell-level Wilcoxon "
-        "tests.** It is NOT biological replication and may contain low-expression or "
-        "compositional false positives: with many cells, small random differences reach "
-        "significance. Weigh `pct_a`/`pct_b`, effect size, and gene class in "
-        "`recurring-programs.csv` and `direct-matched-region-degs.csv` before treating a "
-        "recurring program as real.",
+        "## Parameters used",
         "",
-        "Gene-level, within-sample identity DEGs are primary; matches use DISCRIMINATING "
-        "genes only (broad/stress/housekeeping and nuisance genes cannot manufacture a "
-        "match). Composition, Cramér's V, and neighborhood mixing are advisory context. A "
-        "matched identity plus a direct gene list does NOT prove a technical batch effect; "
-        "cell-level q-values rank separation and are not sample-level replication. The "
-        "verdict is advisory — the decision is recorded separately, and a confounded design "
-        "is never silently reclassified as technical.",
+        f"- batch column `{evidence['batch_key']}`, cluster column `{evidence['cluster_key']}`",
+        "- DE test: scanpy Wilcoxon (in-environment)",
+        f"- a region is kept when it has at least {p.get('min_cells_per_region', 30)} cells and is "
+        f"at least {p.get('min_enrichment', 2.0)}× more concentrated than the sample's own size",
+        f"- a cross-sample match needs at least {p.get('min_shared_identity_genes', 3)} shared "
+        f"discriminating genes and Jaccard ≥ {p.get('min_match_jaccard', 0.15)}",
+        f"- at most {p.get('max_candidate_pairs', '—')} matched pairs receive a direct comparison "
+        "(the strongest matches first)",
+        "",
+        "## Files",
+        "",
+        "### `sample-enriched-regions.csv` — where to look",
+        "Each row is a (cluster, sample) region holding far more of one sample's cells than its "
+        "overall size would predict — measured as concentration relative to expected, not raw "
+        "purity, so a region that is 42% of a sample that is only 9% of the data is caught. "
+        "`enrichment` = fraction-of-cluster ÷ sample's-fraction-of-dataset (2 = twice expected).",
+        "",
+        "### `within-sample-identity-degs.csv` — the main evidence",
+        "For each region above, the genes that set that cell type apart — compared **inside one "
+        "sample** (this cluster vs. the rest of that same sample). Holding the sample constant "
+        "means these genes describe what the cell type IS (its identity), with no sample "
+        "differences mixed in. Read the effect and percent-expressed columns; the q-value is only "
+        "a ranking aid.",
+        "",
+        "### `population-matches.csv` — the same cell type across samples",
+        "Pairs a region in one sample with a region in another that share enough "
+        "**discriminating** identity genes to be treated as the same cell type. "
+        "Broad/stress/housekeeping genes are "
+        "ignored so two different cell types can't 'match' just because both are, say, stressed. A "
+        "supported match means comparing them is meaningful — not that they are identical.",
+        "",
+        "### `direct-matched-region-degs.csv` — supporting detail",
+        "For each matched pair, exactly how the same cell type differs between the two samples, "
+        "gene by gene. ALL genes are kept here (stress, mitochondrial, ribosomal and ambient genes "
+        "are "
+        "often the clearest sign of a sample-linked program). It supports the picture but does not "
+        "outrank the within-sample evidence, and on its own does not prove the difference is "
+        "technical.",
+        "",
+        "### `recurring-programs.csv` — does the shift repeat?",
+        "Genes that are consistently higher in the same sample across two or more different cell "
+        "populations. A shift that repeats is dataset-wide rather than a one-off — but "
+        "dataset-wide is still not the same as technical. This is an advisory signal from "
+        "cell-level tests, not "
+        "biological replication; weigh `pct_a`/`pct_b` and effect size before trusting a program.",
+        "",
+        "### `design-confounding.csv` — the piece the genes can't supply",
+        "Whether the study design lets us separate 'which sample' from 'which biological "
+        "condition'. If every sample is one condition, a technical batch and a real biological "
+        "difference cannot be told apart from the data. `status = unknown` means no design "
+        "metadata was available — "
+        "recorded honestly, not as 'not confounded'.",
+        "",
+        "### `batch-composition.png` + `batch-cluster-*.csv` — advisory context",
+        "How each sample is distributed across clusters, and the ARI/NMI agreement between "
+        "clusters and samples. These tell you WHERE samples separate, never WHY (biology and a "
+        "technical "
+        "batch push them the same way), so they never decide anything on their own — and a high "
+        "value must never be read as proof of a tumor or any particular tissue.",
+        "",
+        "## Interpretation (this dataset)",
+        "",
+        str(evidence.get("plain_interpretation", "")),
+        "",
     ]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -1037,8 +1626,6 @@ def run_decision(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     evidence_id = str(arguments["evidence_id"])
     decision = str(arguments["decision"])
     rationale = str(arguments["rationale"]).strip()
-    integration_basis = arguments.get("integration_basis")
-    override_warning = arguments.get("override_warning")
     if not rationale:
         raise ValueError("rationale must not be empty")
 
@@ -1051,40 +1638,21 @@ def run_decision(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
         raise ValueError("no current batch evidence is available; run investigate_batch first")
     if evidence.get("evidence_id") != evidence_id:
         raise ValueError("evidence_id does not match the current batch evidence")
-    if decision == "not_applicable" and evidence.get("status") != "not_applicable":
-        raise ValueError("not_applicable decision requires not_applicable evidence")
-
-    recommendation = str(evidence.get("recommendation"))
-    basis_verdict = validate_integration_basis(integration_basis, evidence)
-    if not basis_verdict["ok"]:
-        raise ValueError(basis_verdict["violation"])
-    verdict = validate_decision(decision, recommendation, integration_basis, override_warning)
-    if not verdict["ok"]:
-        raise ValueError(verdict["violation"])
+    if evidence.get("status") == "not_applicable":
+        raise ValueError("batch handling is already not applicable; no decision is needed")
 
     decision_fact = {
         "decision": decision,
         "rationale": rationale,
         "evidence_id": evidence_id,
-        "integration_basis": integration_basis,
-        "override_warning": override_warning,
-        "recommendation": recommendation,
-        "validated": True,
-        "decision_policy_version": DECISION_POLICY_VERSION,
-        "cell_set_id": evidence.get("cell_set_id"),
-        "count_representation_id": evidence.get("count_representation_id"),
-        "representation_id": evidence.get("representation_id"),
-        "clustering_id": evidence.get("clustering_id"),
     }
     (context.staging_dir / "batch-decision.md").write_text(
-        f"# Batch handling decision\n\n- Decision: **{decision}**\n- Recommendation: "
-        f"{recommendation}\n- Evidence: `{evidence_id}`\n- Integration basis: {integration_basis}\n"
-        + (f"- Override warning: {override_warning}\n" if override_warning else "")
-        + f"\n## Rationale\n\n{rationale}\n",
+        f"# Batch handling decision\n\n- Decision: **{decision}**\n"
+        f"- Evidence: `{evidence_id}`\n\n## Rationale\n\n{rationale}\n",
         encoding="utf-8",
     )
     return {
-        "summary": f"Recorded batch decision {decision!r} (recommendation {recommendation!r}).",
+        "summary": f"Recorded batch decision {decision!r} against the current evidence.",
         "details": decision_fact,
         "facts_patch": {"batch": {"decision": decision_fact}},
         "decisions_patch": {"batch_handling": {"decision": decision, "rationale": rationale}},

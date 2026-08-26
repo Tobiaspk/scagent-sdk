@@ -256,3 +256,39 @@ def test_confirmed_filter_issues_new_dataset_and_invalidates_downstream(
     assert result["facts_patch"]["annotation"] is None
     assert result["facts_patch"]["doublets"]["evidence"] is None
     assert result["decisions_patch"]["final_labels"] is None
+
+
+def test_current_evidence_accepts_a_review_path_under_the_committed_action_dir(
+    tmp_path: Path,
+) -> None:
+    """Regression: committed artifact dirs are named ``<action>--<execution_id>`` (aa8492c), so a
+    review path resolved from that directory must match the recorded ``annotated_path``. When the
+    skill recorded the path from the bare execution_id instead, every review failed with
+    "review path does not match the current doublet evidence artifact"."""
+
+    _evaluate, review = _handlers()
+    current_evidence = review.__globals__["_current_evidence"]
+    committed = "artifacts/capabilities/evaluate-doublet-evidence--exec-1/doublet-annotated.zarr"
+    session_dir = tmp_path / "session"
+    context = SimpleNamespace(
+        session_dir=session_dir,
+        state_facts={
+            "analysis": {"cell_set": {"id": "cells-a"}},
+            "doublets": {
+                "evidence": {
+                    "status": "complete",
+                    "evidence_id": "doublets-a",
+                    "cell_set_id": "cells-a",
+                    "annotated_path": committed,
+                }
+            },
+        },
+    )
+    review_path = (session_dir / committed).resolve()
+    provenance = {"doublet_evidence_id": "doublets-a"}
+
+    assert current_evidence(context, review_path, provenance)["evidence_id"] == "doublets-a"
+
+    stale = (session_dir / "artifacts/capabilities/exec-1/doublet-annotated.zarr").resolve()
+    with pytest.raises(ValueError, match="does not match the current doublet evidence"):
+        current_evidence(context, stale, provenance)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -362,6 +363,59 @@ def test_missing_interpreter_and_absent_gpu_are_reported_as_unavailable(
     )
     assert reports[0].status == "ready"
     assert "2 GPU(s)" in reports[0].summary
+
+
+def test_gpu_snapshot_counts_unified_memory_devices_reporting_na_free(monkeypatch) -> None:
+    # The GB10 (DGX Spark) enumerates as index 0 but reports memory.free as "[N/A]".
+    # Presence must be recovered from the index row; free memory degrades to unknown.
+    from scagent_sdk.capabilities import readiness as readiness_module
+
+    def fake_run(cmd: list[str], **_: Any) -> SimpleNamespace:
+        assert "--query-gpu=index,memory.free" in cmd
+        return SimpleNamespace(returncode=0, stdout="0, [N/A]\n")
+
+    monkeypatch.setattr(readiness_module.subprocess, "run", fake_run)
+    assert readiness_module._gpu_snapshot() == (1, None)
+
+
+def test_gpu_snapshot_parses_multiple_devices_with_free_memory(monkeypatch) -> None:
+    from scagent_sdk.capabilities import readiness as readiness_module
+
+    def fake_run(cmd: list[str], **_: Any) -> SimpleNamespace:
+        return SimpleNamespace(returncode=0, stdout="0, 81000\n1, 40000\n")
+
+    monkeypatch.setattr(readiness_module.subprocess, "run", fake_run)
+    assert readiness_module._gpu_snapshot() == (2, 81000)
+
+
+def test_present_gpu_with_unknown_free_memory_is_reported_ready(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # A device that is present but does not expose free memory must not be blocked; the
+    # min-memory gate is only meaningful when free memory is actually reported.
+    from scagent_sdk.capabilities import readiness as readiness_module
+
+    interpreter = tmp_path / "python"
+    interpreter.write_text("", encoding="utf-8")
+    gpu_profile = _profile(python=interpreter, gpu_required=True, min_gpu_memory_mb=4096)
+
+    class Package:
+        manifest = type(
+            "Manifest",
+            (),
+            {
+                "skill_id": "demo",
+                "tools": (type("Tool", (), {"environment": "gpu-env"})(),),
+                "readiness": None,
+            },
+        )()
+
+    monkeypatch.setattr(readiness_module, "_gpu_snapshot", lambda: (1, None))
+    reports = readiness_module.probe_environments(
+        (Package(),), broker=_environment_broker({"gpu-env": gpu_profile})
+    )
+    assert reports[0].status == "ready"
+    assert "free memory unknown" in reports[0].summary
 
 
 def test_rendered_block_covers_environments_and_assets_in_separate_sections() -> None:

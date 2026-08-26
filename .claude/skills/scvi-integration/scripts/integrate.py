@@ -57,7 +57,9 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
         accelerator="auto",
         devices="auto",
         early_stopping=True,
-        enable_progress_bar=False,
+        # Emit the Lightning/tqdm epoch bar so the broker can stream it to the terminal as live
+        # progress ("Epoch X/N") during a multi-minute train, the way the legacy run showed it.
+        enable_progress_bar=True,
     )
     adata.obsm["X_scVI"] = model.get_latent_representation()
     representation_id = _identity(
@@ -122,7 +124,9 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
                 "clustering": None,
             },
             "cluster_qc": None,
-            "batch": None,
+            # The batch fact is preserved: the integrate/keep decision was made once on the
+            # uncorrected pass and authorized this training; integration is its consequence, not a
+            # trigger to re-decide. Post-integration mixing is verified by score_integration.
             "annotation": None,
             "finalization": None,
         },

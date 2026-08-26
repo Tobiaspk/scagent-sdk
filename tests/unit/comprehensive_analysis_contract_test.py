@@ -67,6 +67,32 @@ def test_qc_review_requires_every_figure_and_resolves_keep_all() -> None:
     assert result["facts_patch"]["cell_qc"]["review"]["status"] == "resolved"
 
 
+def test_qc_review_automatically_records_figures_already_shown_by_the_runtime() -> None:
+    review = _handler("single-cell-qc", "review_single_cell_qc")
+    context = SimpleNamespace(
+        state_facts={
+            "cell_qc": {
+                "status": "assessed",
+                "assessment_id": "qc-a",
+                "required_visual_artifacts": ["figures/a.png", "figures/b.png"],
+                "shown_visual_artifacts": ["figures/a.png", "figures/b.png"],
+            }
+        }
+    )
+
+    result = review(
+        {
+            "assessment_id": "qc-a",
+            "decision": "keep_all",
+            "rationale": "Both attached views support retaining the continuous tails.",
+            "visual_findings": ["The attached views contain no isolated quality island."],
+        },
+        context,
+    )
+
+    assert result["details"]["reviewed_artifacts"] == ["figures/a.png", "figures/b.png"]
+
+
 def test_umap_default_uses_scanpy_convention_without_stripping_prefix() -> None:
     helper = _handler(
         "dimensionality-reduction", "compute_single_cell_umap"
@@ -109,6 +135,36 @@ def test_cluster_review_requires_all_figures_and_exact_flagged_clusters() -> Non
     assert result["facts_patch"]["cluster_qc"]["review"]["status"] == "action_required"
 
 
+def test_cluster_review_accepts_extra_well_supported_cluster_notes_and_shown_overview() -> None:
+    review = _handler("cluster-qc", "review_cluster_qc")
+    context = SimpleNamespace(
+        state_facts={
+            "cluster_qc": {
+                "status": "attested",
+                "evidence_id": "cluster-qc-a",
+                "review_clusters": ["2"],
+                "required_visual_artifacts": ["metric.png", "umap.png"],
+                "shown_visual_artifacts": ["metric.png", "umap.png"],
+            }
+        }
+    )
+
+    result = review(
+        {
+            "evidence_id": "cluster-qc-a",
+            "visual_findings": ["Cluster 2 is compact in the attached overview."],
+            "cluster_reviews": {
+                "2": {"disposition": "keep", "rationale": "Coherent identity evidence."},
+                "7": {"disposition": "keep", "rationale": "Useful negative-control note."},
+            },
+        },
+        context,
+    )
+
+    assert result["details"]["reviewed_artifacts"] == ["metric.png", "umap.png"]
+    assert set(result["details"]["cluster_reviews"]) == {"2", "7"}
+
+
 def test_annotation_review_requires_second_reference_or_specific_waiver() -> None:
     review = _handler("marker-annotation", "review_annotation_evidence")
     context = SimpleNamespace(
@@ -142,4 +198,3 @@ def test_annotation_review_requires_second_reference_or_specific_waiver() -> Non
     arguments["reference_waiver"] = "No compatible cached CellTypist model exists."
     result = review(arguments, context)
     assert result["facts_patch"]["annotation"]["review"]["status"] == "resolved"
-

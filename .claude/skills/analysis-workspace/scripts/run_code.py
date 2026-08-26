@@ -85,7 +85,7 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
                 context.execution_id: {
                     "purpose": purpose,
                     "status": "complete",
-                    "code_path": f"artifacts/capabilities/{context.execution_id}/analysis.py",
+                    "code_path": f"{context.artifact_relative_path}/analysis.py",
                 }
             }
         },

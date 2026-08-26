@@ -110,6 +110,7 @@ def test_reference_runs_is_session_scoped_despite_nesting_a_cell_set_id() -> Non
 
     assert fact_scope("reference_runs") == "session"
     assert fact_scope("annotation") == "node"
+    assert fact_scope("group_gene_ranking") == "node"
 
 
 def test_every_registered_root_has_a_valid_scope() -> None:

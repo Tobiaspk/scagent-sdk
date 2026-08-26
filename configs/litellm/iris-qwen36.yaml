@@ -1,4 +1,7 @@
-# Iris deployment verified against the vLLM service on iscp001.
+# Iris gateway config — model-agnostic. The upstream vLLM model + endpoint are
+# read from the environment (loaded from .env), so switching models is a one-line
+# .env edit, not a new config file. See SCAGENT_SDK_UPSTREAM_* in .env / .env.example.
+#
 # The Claude Agent SDK calls LiteLLM's Anthropic Messages endpoint. LiteLLM then
 # translates to the upstream OpenAI-compatible chat-completions API.
 # Qwen's reasoning mode is OFF by default on vLLM; enable_thinking (passed to the server via
@@ -7,9 +10,9 @@
 model_list:
   - model_name: scagent-primary
     litellm_params:
-      model: openai/Qwen3.6-27B
-      api_base: http://iscp001:8000/v1
-      api_key: local-noauth
+      model: os.environ/SCAGENT_SDK_UPSTREAM_MODEL
+      api_base: os.environ/SCAGENT_SDK_UPSTREAM_BASE_URL
+      api_key: os.environ/SCAGENT_SDK_UPSTREAM_API_KEY
       merge_reasoning_content_in_choices: true
       extra_body:
         chat_template_kwargs:
@@ -17,9 +20,9 @@ model_list:
 
   - model_name: scagent-fast
     litellm_params:
-      model: openai/Qwen3.6-27B
-      api_base: http://iscp001:8000/v1
-      api_key: local-noauth
+      model: os.environ/SCAGENT_SDK_FAST_MODEL
+      api_base: os.environ/SCAGENT_SDK_UPSTREAM_BASE_URL
+      api_key: os.environ/SCAGENT_SDK_UPSTREAM_API_KEY
       merge_reasoning_content_in_choices: true
       extra_body:
         chat_template_kwargs:

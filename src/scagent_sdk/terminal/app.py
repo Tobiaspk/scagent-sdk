@@ -84,6 +84,10 @@ class RichInteractiveAgent:
         else:
             context = "runtime-reported when available"
         resume = self.resume_preference.value if self.resume_preference else "new session"
+        # Show the live upstream model the gateway resolves to (e.g. "Qwen3.8-27B"),
+        # not the static profile alias — the profile is deliberately model-agnostic.
+        advertised = self.model_limits.advertised_model if self.model_limits else None
+        model_label = (advertised or self.profile.model).rsplit("/", 1)[-1]
         body = Text.assemble(
             ("scagent-sdk", "bold cyan"),
             " — skill-driven single-cell analysis agent\n\n",
@@ -91,7 +95,7 @@ class RichInteractiveAgent:
             (self.session.session_id, "white"),
             "\n",
             ("  Model:    ", "dim"),
-            (f"{self.profile.name}:{self.profile.model}", "white"),
+            (model_label, "white"),
             "\n",
             ("  Gateway:  ", "dim"),
             (gateway, "green"),

@@ -12,9 +12,10 @@ import os
 import re
 import sys
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import suppress
 from copy import deepcopy
+from functools import partial
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -76,6 +77,69 @@ _PATH_ARGUMENT_SUFFIXES = ("_dir", "_directory", "_file", "_path")
 
 class _AlreadyCommitted(Exception):
     """Internal signal for a duplicate commit observed only after the store reloads state."""
+
+
+# Longest edge, in pixels, of an image sent to the model. The model's own image pipeline resamples
+# to roughly this edge, so a larger preview costs transport without adding legibility (mirrors the
+# inspect-media skill's DEFAULT_IMAGE_SIDE).
+_MODEL_IMAGE_EDGE = 1568
+# Progressively smaller edges tried when a figure is still over budget at the default edge.
+_MODEL_IMAGE_FALLBACK_EDGES = (1280, 1024, 768, 512)
+
+
+def _bounded_model_image(data: bytes, media_type: str, limit: int) -> tuple[bytes, str]:
+    """Return image bytes that fit ``limit``, downscaling and re-encoding only if needed.
+
+    A dense scientific figure -- a multi-panel UMAP of tens of thousands of cells -- can exceed the
+    per-image transport budget as a full-resolution PNG. Discarding the whole capability result over
+    that (the prior behavior) threw away real science for a presentation-layer concern; the model's
+    own pipeline would have resampled the image anyway. Instead we shrink the pixels sent to the
+    model to fit, exactly as the ``inspect-media`` skill normalizes previews. The committed artifact
+    on disk is untouched and stays full resolution; only the attached copy is bounded.
+
+    PNG is kept when it already fits or is smaller than the JPEG; otherwise the figure is flattened
+    to JPEG, which is far smaller for antialiased scatter/heatmap content. If even the smallest edge
+    cannot get under ``limit`` (pathological), the smallest encoding produced is returned rather
+    than raising -- an oversized-but-present figure beats a lost result.
+    """
+
+    if len(data) <= limit:
+        return data, media_type
+    try:
+        import io
+
+        from PIL import Image
+    except Exception:
+        # Without Pillow we cannot resample; return the original and let transport handle it rather
+        # than losing the result.
+        return data, media_type
+
+    def _encode(edge: int) -> list[tuple[int, bytes, str]]:
+        with Image.open(io.BytesIO(data)) as source:
+            image = source.copy()
+        image.thumbnail((edge, edge), Image.Resampling.LANCZOS)
+        options: list[tuple[int, bytes, str]] = []
+        png_buffer = io.BytesIO()
+        (image if image.mode in {"RGB", "RGBA", "L"} else image.convert("RGB")).save(
+            png_buffer, format="PNG", optimize=True
+        )
+        options.append((png_buffer.tell(), png_buffer.getvalue(), "image/png"))
+        flat = image.convert("RGB")
+        jpeg_buffer = io.BytesIO()
+        flat.save(jpeg_buffer, format="JPEG", quality=85, optimize=True)
+        options.append((jpeg_buffer.tell(), jpeg_buffer.getvalue(), "image/jpeg"))
+        return options
+
+    best: tuple[int, bytes, str] | None = None
+    for edge in (_MODEL_IMAGE_EDGE, *_MODEL_IMAGE_FALLBACK_EDGES):
+        for size, encoded, mime in _encode(edge):
+            if size <= limit:
+                return encoded, mime
+            if best is None or size < best[0]:
+                best = (size, encoded, mime)
+    if best is not None:
+        return best[1], best[2]
+    return data, media_type
 
 
 def _concise_capability_error(message: str) -> str:
@@ -249,10 +313,18 @@ class CapabilityExecutor:
         package: SkillPackage,
         tool: CapabilityTool,
         arguments: dict[str, Any],
+        *,
+        progress: Callable[[str], None] | None = None,
     ) -> dict[str, Any]:
         execution_id = str(uuid4())
         staging_dir = self.pending_root / execution_id
         staging_dir.mkdir()
+        # Decide the committed artifact directory up front so a skill can record a correct path to
+        # its own output; the same name is honored at commit (see _stage_result), so the path a
+        # skill writes into facts and the eventual on-disk location always agree.
+        artifact_relative_path = "artifacts/capabilities/" + capability_artifact_directory_name(
+            tool.name, execution_id
+        )
         context = CapabilityContext(
             scientific_session_id=self.session.session_id,
             session_dir=self.session.directory,
@@ -263,6 +335,7 @@ class CapabilityExecutor:
             state_revision=self.session.store.state.revision,
             state_facts=deepcopy(self.session.store.state.facts),
             state_lineage=deepcopy(self.session.store.state.lineage),
+            artifact_relative_path=artifact_relative_path,
         )
         resolved_arguments = _resolve_session_paths(arguments, self.session.directory)
         try:
@@ -282,7 +355,7 @@ class CapabilityExecutor:
                 environment = {"name": "current", "python": sys.executable}
             elif self.environment_broker is not None:
                 execution = await self._execute_in_environment(
-                    package, tool, resolved_arguments, context
+                    package, tool, resolved_arguments, context, progress=progress
                 )
                 value = execution.value
                 environment = execution.provenance
@@ -478,6 +551,8 @@ class CapabilityExecutor:
         tool: CapabilityTool,
         arguments: dict[str, Any],
         context: CapabilityContext,
+        *,
+        progress: Callable[[str], None] | None = None,
     ) -> Any:
         """Run a compute capability off the event loop so the turn stays interruptible.
 
@@ -491,7 +566,9 @@ class CapabilityExecutor:
         broker = self.environment_broker
         assert broker is not None
         worker = asyncio.ensure_future(
-            asyncio.to_thread(broker.execute, package, tool, arguments, context)
+            asyncio.to_thread(
+                partial(broker.execute, package, tool, arguments, context, progress=progress)
+            )
         )
         try:
             return await asyncio.shield(worker)
@@ -576,12 +653,12 @@ class CapabilityExecutor:
                 ) from exc
             if not source.is_file():
                 raise CapabilityExecutionError(f"declared model_media does not exist: {source}")
-            size = source.stat().st_size
-            if size > MODEL_MEDIA_LIMIT_BYTES:
-                raise CapabilityExecutionError(
-                    f"model_media exceeds {MODEL_MEDIA_LIMIT_BYTES} bytes: {media.relative_path}"
-                )
-            total += size
+            # A figure over the per-image budget is downscaled to fit rather than discarded: the
+            # full-resolution artifact stays committed on disk and only the attached copy shrinks.
+            data, mime = _bounded_model_image(
+                source.read_bytes(), media.media_type, MODEL_MEDIA_LIMIT_BYTES
+            )
+            total += len(data)
             if total > MODEL_MEDIA_TOTAL_BYTES:
                 raise CapabilityExecutionError(
                     f"model_media totals more than {MODEL_MEDIA_TOTAL_BYTES} bytes; attach fewer "
@@ -590,8 +667,8 @@ class CapabilityExecutor:
             content.append(
                 {
                     "type": "image",
-                    "data": base64.b64encode(source.read_bytes()).decode("ascii"),
-                    "mimeType": media.media_type,
+                    "data": base64.b64encode(data).decode("ascii"),
+                    "mimeType": mime,
                 }
             )
         if content:
@@ -679,9 +756,10 @@ class CapabilityExecutor:
                     "existed, so there is no lineage node to attach them to"
                 )
         # The committed artifact directory is named for the action, not just its UUID, so a session
-        # tree reads legibly. The name is decided here, recorded in result.json, and honored at
-        # commit, so the model-facing paths and the eventual on-disk location always agree.
-        artifact_relative_path = (
+        # tree reads legibly. The name is decided at dispatch, handed to the skill on the context,
+        # recorded in result.json, and honored at commit, so the model-facing paths and the
+        # eventual on-disk location always agree.
+        artifact_relative_path = context.artifact_relative_path or (
             "artifacts/capabilities/"
             + capability_artifact_directory_name(tool.name, context.execution_id)
         )

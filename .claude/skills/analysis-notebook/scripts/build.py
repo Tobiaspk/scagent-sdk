@@ -70,6 +70,9 @@ def _capability_history(session_dir: Path) -> list[dict[str, Any]]:
                 "arguments": raw.get("arguments", {}),
                 "summary": raw.get("summary", ""),
                 "files": raw.get("files", []),
+                # The committed dir is named <action>--<execution_id>, so the record's own path is
+                # authoritative; reconstructing it from execution_id alone is stale.
+                "path": raw.get("path"),
             }
         )
     return sorted(history, key=lambda item: (item["sequence"], item["execution_id"]))

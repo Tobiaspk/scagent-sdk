@@ -10,7 +10,7 @@ base_url = "http://127.0.0.1:4000"
 api_key_env = "SCAGENT_SDK_GATEWAY_API_KEY"
 allow_noauth = true
 system_prompt = "prompts/base.md"
-max_turns = 40
+max_turns = 100
 skills = []
 
 [health]

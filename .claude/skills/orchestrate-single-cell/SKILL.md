@@ -22,42 +22,42 @@ from an already processed artifact, and the observed data may require replanning
 3. Normalize, select HVGs, compute PCA, inspect the PCA variance figure, build neighbors, compute
    UMAP, and call `plot_qc_embedding`. Explain where quality signals localize; distributions alone
    do not show whether a signal is a coherent population.
-4. Cluster **iteratively, not in parallel**. Unless the user specifies another ladder, descend
-   Leiden **2.0 → 1.5 → 1.0**, one round at a time, each round running on the cells the previous
-   round left behind. A later resolution is not a competing candidate on the same cells; it is the
-   next phase on cleaner cells. Per round:
-   1. Cluster at that round's resolution into a distinct key such as `leiden_res_2_0`.
-   2. Run `evaluate_cluster_qc` in its default report-only mode, inspect its per-cluster metric
-      boxplots, cluster/QC UMAP, per-cluster highlight grid, and every covariance heatmap, then
-      call `review_cluster_qc`.
-   3. If the review confirms removal, apply it by re-running `evaluate_cluster_qc` with
-      `auto_remove_convergent=true`. That issues fresh cell-set and count identities and clears the
-      representation, clustering, cell-QC, and doublet evidence.
-   4. Re-prepare the retained cells before the next round: normalize, **re-select HVGs**, PCA,
-      neighbors, UMAP, and re-run cell QC with its review. Removing cells changes the variance
-      landscape, so HVG selection must be recomputed rather than carried across a cleanup.
-   5. Step down to the next resolution and repeat.
+4. Cluster first at exploratory Leiden **2.0** to expose small low-quality populations. Run
+   `evaluate_cluster_qc` in report-only mode, inspect its compact evidence and the attached standard
+   figures, open a covariance heatmap only for a genuinely ambiguous cluster, and call
+   `review_cluster_qc`. If the review confirms removal, apply it, then re-normalize, re-select HVGs,
+   recompute PCA/neighbors/UMAP, and repeat exploratory QC on the retained cells. Removing cells
+   changes the variance landscape; do not reuse the old HVG mask or embedding.
 
-   The high resolution exists to expose small low-quality populations for removal; the lower ones
-   are the working and annotation granularities on progressively cleaner cells. End the cleanup
-   loop when a round flags nothing that requires removal, but still descend to the annotation
-   resolution. Do not carry an unresolved remove/merge/split/recluster disposition into annotation.
-   The ladder is an overridable default, not a hardcoded requirement; change it when cluster sizes,
-   stability, or biology justify it.
-5. Annotate the clustering at the bottom of the ladder—**1.0 by default**. Deviate only for a
+   If exploratory QC finds no population that should be removed, **stop the cleanup loop**. Do not
+   mechanically run 1.5 and 1.0 plus full cluster-QC reports before investigating batch. Resolution
+   1.5 is an optional refinement when 2.0 exposes a real merge/split ambiguity, not a mandatory
+   toll gate. The ordinary path is one exploratory QC round, batch investigation/decision, then one
+   annotation clustering at 1.0. Do not carry an unresolved remove/merge/split/recluster disposition
+   into annotation.
+5. With a clean exploratory representation, investigate batch structure when meaningful batch
+   metadata exists. Use the bounded profile-nomination investigation, present its compact evidence
+   to the user, and stop for an explicit handling choice before recording a decision. Record
+   `not_applicable` when no defensible batch unit exists. Investigate batch **once**, on the
+   uncorrected pass — it is the expensive gene-first diagnostic and answers only *whether* to
+   integrate. If integration is chosen, rebuild the neighbors/UMAP from the integrated
+   representation, then verify the correction with **`score_integration`** (X_scVI mixing vs the
+   X_pca baseline) — do **not** re-run `investigate_batch` to check integration; the once-made
+   batch decision carries through integration and re-clustering to finalization. A recurring
+   sample-linked program that persists in the gene evidence after scVI is expected donor biology,
+   not proof the integration failed; judge success from mixing improvement, not from gene programs.
+6. Create the annotation clustering at **1.0 by default**. Deviate only for a
    stated scientific reason, such as DEG identity, covariance coherence, or separation showing
    genuine over- or under-splitting; never merely because a finer clustering was run more recently.
    Compute DEGs only once you are on the clustering you intend to annotate, since a DEG pass at a
-   QC resolution is discarded when you later step down. Make that clustering current, then
-   investigate batch structure when meaningful batch metadata exists and record an explicit
-   decision. Record `not_applicable` when no defensible batch unit exists.
-6. For annotation, use SCimilarity early when it helps establish broad tissue/context, inspect the
+   QC resolution is discarded when you later step down. Make that clustering current.
+7. For annotation, use SCimilarity early when it helps establish broad tissue/context, inspect the
    complete readiness inventory of cached CellTypist models, and choose the closest organism/tissue
    model rather than a generic immune default. When both are suitable, run and summarize both and
    visualize their agreement. Generate cluster DEGs and marker programs; **DEGs are the primary
    decision basis**, while references and curated marker resources such as Cytopus corroborate or
    challenge the call. Query the reference atlas or literature for genuinely ambiguous clusters.
-7. Call `review_annotation_evidence`, leaving ambiguous clusters unresolved until the evidence is
+8. Call `review_annotation_evidence`, leaving ambiguous clusters unresolved until the evidence is
    adequate. Finalize only then. The final report must reconstruct the full committed workflow,
    parameters, QC decisions, cluster reviews, batch decision, annotation disagreements, caveats,
    and deliverables.

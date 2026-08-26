@@ -1,8 +1,137 @@
 # Current project state
 
-Status date: 2026-08-06  
+Status date: 2026-08-25  
 Authority: this is the concise source of truth for what exists now, what was actually verified,
 and what should happen next. Historical detail remains in `docs/handoff.md`.
+
+## Live parity repair: bounded reasoning, GPU core, and decision-ready rollover (2026-08-25)
+
+Comparison of SDK runs `run_20260824T154932Z_01b778` / `run_20260824T190028Z_0207ad` against
+legacy `run_2026_08_24_114317` identified four mechanical regressions:
+
+- Batch investigation used DEG as its search algorithm: 30 within-sample Wilcoxon jobs, every
+  cross-sample region pair, giant union-find components, then 15 direct Wilcoxon jobs. It took
+  about 28 minutes and its recurrence tie-break was alphabetical. The repaired capability ports
+  legacy's shape: cheap region-mean profile correlation nominates candidates; within-sample DEG is
+  lazy and bounded to 10 attempts; execution stops after three confirmed identity matches; direct
+  DEG runs only for those three; recurring programs rank by recurrence and effect magnitude, and
+  actual cluster populations replace synthetic connected components. A read-only run on the exact
+  affected `leiden_res_1_0` artifact completed in **53.8 seconds**, with three attempts, three
+  supported myeloid identity pairs, and meaningful leading programs (`RPS4Y1`, `TXNIP`, `XIST`),
+  rather than thousands of alphabetical genes.
+- Cluster QC sampled 20,000 cells for exact silhouette, implying about 400 million pair distances
+  and accounting for the observed ~21-minute QC step. The deterministic default is now 3,000
+  sampled cells (~44x less pairwise work), with the sample count recorded. The ordinary workflow
+  no longer pays for mandatory 2.0→1.5→1.0 full QC rounds: 2.0 is exploratory cleanup, 1.5 is used
+  only for a real ambiguity, batch is investigated once exploratory QC is clean, and 1.0 is created
+  for annotation after the batch decision.
+- `gpu-singlecell` reserved a GPU but core preprocessing still called Scanpy CPU implementations.
+  Normalization/log1p, HVG selection, PCA, neighbors, UMAP, and Leiden now call RAPIDS SingleCell,
+  then convert to CPU only for durable Zarr persistence. The exact installed API path passed a real
+  CUDA smoke test (300 cells: normalization→HVG→PCA→neighbors→UMAP→Leiden). Wilcoxon remains CPU,
+  matching legacy, but is bounded as above. Reports record `compute_backend=rapids_singlecell`.
+- Rollover context previously retained enough exhaustive evidence to exceed 96 KiB, then replaced
+  all facts/decisions with hashes and instructed the model to read `state.json`. A 48,000-character
+  `read_text_file` result itself crossed the 48 KiB inline-detail ceiling, spilled to
+  `details.json`, and invited the recursive read observed in the live run. Rollover now supplies a
+  decision-ready projection (status, identities, conclusions, decisions, and unresolved work
+  inline; exhaustive drill-down lists as count+hash), bounds artifact summaries/files, and tells
+  the model not to reread state for ordinary continuation. Text reads are explicit offset pages
+  capped at 32,000 characters. On the affected 372 KiB state, reconstructed context is 66,792
+  characters, retains the batch evidence and active `leiden_res_1_0`, and does not whole-compact
+  facts or decisions.
+
+Zarr is **not** the dominant regression. The affected session is 6.38 GB by logical file sizes but
+about 3.77 GB in unique inode blocks; 13,079 of 19,308 files are hardlinked, including unchanged
+matrix chunks. Reopening one durable artifact per isolated capability is a secondary cost, but the
+28-minute batch and 21-minute cluster-QC steps each read once and were dominated by the algorithms
+above. Keep the event-sourced/Zarr provenance design. A future optimization may add a host-side
+read-through AnnData cache keyed by immutable artifact identity; model context should never own the
+object.
+
+CellTypist no longer silently defaults to `Immune_All_Low.pkl`. The model argument is explicit for
+provenance, and orchestration chooses an unambiguous closest cached organism/tissue model without
+asking the user to select a filename; it asks only when context or model scope is genuinely
+ambiguous. The previously observed `group_gene_ranking` commit failure is also fixed by registering
+that fact root as node-scoped lineage state.
+
+## Context compaction and same-turn rollover keep long analyses running (2026-08-24)
+
+A long analysis could overflow the model context window mid-run. In
+`run_20260818T211749Z_098b0a` a SCimilarity query committed fine, then the next turn failed with
+`Input length (269860) exceeds model's maximum context length (262144)`. Root cause: the runtime
+delegated the whole transcript to the Claude Agent SDK session (`resume` + `session_store`) and only
+ever appended — every turn replayed the full history, including every figure. That transcript was
+40.5 MiB, of which 39.6 MiB was base64 across **127 image blocks** (105 from three
+`evaluate_cluster_qc` runs). The only defenses were a per-result media cap, a preflight that
+*refuses* (raising `ContextRolloverRequired`), and reconstructed resume; the runtime otherwise leaned
+on the Claude CLI's autocompact, which does not engage for a local model behind litellm. Legacy
+`scagent` never hit this because it owned its message list and trimmed it before every turn.
+
+The replay-side fix is a legacy-style compactor, `runtime/compaction.py` (pure Python, unit-tested).
+It applies to the return value of `ScientificSessionTranscriptStore.load()` — the copy the SDK materializes as the
+replayed transcript (`claude_agent_sdk/_internal/session_resume.py`) — so the append-only
+`transcript.jsonl` on disk stays complete; only what the model replays is trimmed. Below an 85%
+trim-target `load()` returns the entries byte-identically (short sessions and the SDK conformance
+contract are unaffected). Over target it runs three tiers, largest-first, keeping the recent tail:
+evict aged figures beyond a recent window (default 8, `SCAGENT_MAX_CONTEXT_IMAGES`) → trim aged
+tool-result text → trim aged tool-use args → truncate assistant prose, escalating to an emergency
+tier (reach into the tail, keep one figure) only if still over the hard ceiling. The token estimate
+strips base64 and counts only the model-facing `message`; each figure's duplicated, non-model-facing
+`toolUseResult` mirror is scrubbed of base64 in the replay copy. A calibration factor ratchets upward
+against real `usage`. Compaction is surfaced via `observer.on_context_compacted`. Disable with
+`SCAGENT_COMPACTION_DISABLED=1`.
+
+Replay compaction alone did **not** protect a fresh, long-running turn: `load()` is only called when
+the SDK materializes a saved conversation. `run_20260824T154932Z_01b778` therefore reached the
+provider's exact 262,144-token limit during its first autonomous turn and died. The runtime now
+checks live SDK context usage after each user-side tool-result frame — the point after PostToolUse
+has validated and committed the scientific state. When usage plus output reserve and safety margin
+reaches the window, it gracefully interrupts the replaceable model conversation and the service
+continues the **same user turn** in a new conversation reconstructed from the authoritative session.
+Runtime transcript mirroring is `eager`, not end-of-turn batched, so that boundary is persisted even
+when no terminal `ResultMessage` arrives. Automatic mode permits up to eight rollovers in one turn;
+provider context rejections are handled the same way even for the first/fresh conversation. Exact
+mode remains strict and never reconstructs silently. Thinking configuration is unchanged.
+
+Image handling deliberately departs from a literal legacy port (legacy kept every image, only
+estimating it cheaply) because the images were the whole problem here — aged figures become text
+placeholders naming their saved path, and the pixels remain on disk. Validated on the real failing
+transcript: ~338K→~163K estimated tokens (under budget), 127→8 figures retained, entry count/uuids/
+tool_use↔tool_result pairing preserved, input never mutated, and the materialized replay file drops
+40.5 MiB → 1.22 MiB. The complementary same-turn rollover, fresh-provider-rejection, and repeated
+rollover paths have deterministic coverage; targeted runtime/media/batch suites, Ruff, and strict
+mypy are green.
+
+## Skills now record committed paths from the action-named directory (2026-08-18)
+
+The action-naming change below (2026-08-06) updated every consumer that *reads back* an artifact by
+path, but missed the ~15 skills that *predict their own committed path* at generation time and write
+it into facts (`final_path`, `annotated_path`, `required_visual_artifacts`, per-figure review paths).
+Those still built `artifacts/capabilities/<execution_id>/…` from the bare UUID, so after 2026-08-06
+they recorded a directory that does not exist — the file actually committed to
+`artifacts/capabilities/<action>--<execution_id>/…`. Any later step that resolved one of those
+recorded paths then failed on real data. Observed in `run_20260818T202026Z_5f3336`:
+`review_doublet_evidence` → "review path does not match the current doublet evidence artifact", and
+the single-cell-QC and cluster-QC visual-review floors listing required artifacts at paths that could
+never be found, so the floor could not be satisfied.
+
+Fix: the executor decides `artifact_relative_path` at dispatch (not just at commit) and hands it to
+the skill on `CapabilityContext` (threaded through the broker payload and the worker). Skills now
+build recorded paths as `f"{context.artifact_relative_path}/…"` — one source of truth, the same name
+the executor honors at commit. `analysis-notebook` resolves figures from each record's authoritative
+`path` field instead of reconstructing from `execution_id`. Regression test:
+`test_current_evidence_accepts_a_review_path_under_the_committed_action_dir`.
+
+Separately, an over-budget figure is no longer discarded. `_model_content` previously raised
+"model_media exceeds 2097152 bytes" and threw away the whole capability result when one PNG exceeded
+the 2 MiB per-image transport cap (e.g. `visualize_single_cell` `qc-embedding.png` in the same
+session). It now downscales the pixels sent to the model to fit — long edge ≤1568, PNG→JPEG when
+smaller, mirroring the `inspect-media` normalization and the legacy agent's reliance on the model's
+own resampling — while the committed full-resolution artifact on disk is untouched. Helper
+`_bounded_model_image`; regression test
+`test_bounded_model_image_downscales_oversized_figures_instead_of_failing`. Verified: unit suite
+green, ruff clean, `capability validate` passes (23 skills, 51 tools).
 
 ## Committed capability directories are named for their action (2026-08-06)
 
@@ -61,29 +190,24 @@ Not addressed: **16 other `write_h5ad` sites still use default gzip** (`expressi
 obvious next efficiency pass. `finalize-analysis` should deliberately keep the default for the
 published artifact, where interop matters more than speed.
 
-## Clustering resolutions are now an iterative ladder, not a parallel sweep (2026-07-29)
+## Clustering resolutions have distinct jobs, without a mandatory full ladder (updated 2026-08-25)
 
-The comprehensive-analysis pass had turned the 2.0/1.5/1.0 resolutions into a **beauty contest**:
-three clusterings of the same cells on the same embedding, written to distinct `obs` keys, judged
-side by side, one selected. Legacy `scagent` never did that. There the resolutions are three
-**phases with different jobs**, and each runs on different data than the last:
+The comprehensive-analysis pass had turned the 2.0/1.5/1.0 resolutions into a beauty contest on
+one unchanged embedding. The first correction made all three successive phases mandatory, which
+the live SDK run showed was also too expensive. The current default assigns jobs without requiring
+every rung:
 
 - 2.0 is the first clustering of a run and exists to expose small low-quality populations while
   they are still separable (`agent/prompts.py:220`);
 - confirmed junk is removed, and the cleaned cells are re-embedded — including a **fresh HVG
   selection**, because subsetting cells changes the variance landscape (`agent/prompts.py:203`);
-- 1.5 is the working granularity on that new embedding, repeating until nothing is flagged
-  (`agent/prompts.py:221`);
+- 1.5 is optional when a genuine merge/split ambiguity remains;
 - 1.0 is the annotation granularity that `prepare_annotation` binds to (`agent/prompts.py:222`).
 
-No number of distinct `obs` keys on one unchanged object can reproduce that, because the cleanup
-and re-embedding between rounds are the point. The corrective change is **guidance only**, by
-explicit decision: the ladder is described as a loop in `orchestrate-single-cell/SKILL.md`,
-`orchestrate-single-cell/references/workflow-decisions.md`, and `cluster-qc/SKILL.md`, with 1.0 as
-the default annotation resolution overridable for a stated scientific reason. Observed model
-behavior already follows 2.0 → 1.5 → 1.0, so legacy's harness-level refusal of off-ladder and
-upward resolutions (`agent/tools.py:5114-5175`) was deliberately **not** ported; if drift appears,
-that enforcement plus durable ladder history in facts is the next step.
+No number of distinct `obs` keys on one unchanged object reproduces cleanup because filtering and
+re-embedding are the point. If 2.0 confirms junk, filter and recompute HVGs/PCA/neighbors/UMAP, then
+repeat exploratory QC. If it confirms no removal, stop the cleanup loop, investigate/decide batch,
+and create the 1.0 annotation clustering (from the integrated representation when applicable).
 
 The mutation machinery required no change and already forces the loop: applying a removal through
 `evaluate_cluster_qc(auto_remove_convergent=true)` mints fresh dataset/cell-set/count identities and
@@ -92,9 +216,8 @@ nulls `representation`, `clustering`, `cell_qc`, and `doublets`
 That consequence is now stated in the guidance instead of being left for the model to discover from
 a floor failure.
 
-Validation level: deterministic tests and capability validation only. This is a model-instruction
-change, so it is **not** evidence that the model executes the loop correctly; that needs a live
-end-to-end run.
+This remains guidance rather than a runtime DAG; a fresh live end-to-end run is still required to
+verify model adherence to the shortened default.
 
 ## Figure inspection: adopted the legacy immediate-interpretation model (2026-07-28)
 
@@ -113,26 +236,19 @@ what legacy `scagent` did:
   what a figure *means* stays in the skill; the runtime package holds no biology. This covers every
   skill, including `plot_embedding`, markers, and composition, which previously had no figure
   enforcement of any kind.
-- **`MODEL_MEDIA_LIMIT = 8` made the cluster-QC floor unsatisfiable.** `required_visual_artifacts`
-  lists every per-cluster correlation heatmap (default `max_heatmaps: null`; 20–28 typical), but
-  only 3 overview figures + 5 heatmaps were attached, so ~15–23 required figures were never shown
-  and had to be reopened one at a time. Legacy had **no cap at all**: it auto-encoded every
-  `artifacts_created` entry whose path ended in `.png` and injected all of them. The cap dates to
-  the initial commit with a rationale covering only the byte budgets, not the count. Raised to 64;
-  `cluster-qc` now attaches its whole heatmap set.
+- **Cluster QC attached too many low-value pixels.** A later change raised
+  `MODEL_MEDIA_LIMIT` to 64 and attached every per-cluster covariance heatmap. Three QC rounds in
+  the failing run put 105 heatmaps into context, although legacy's normal decision surface was the
+  metric/UMAP overview plus deterministic per-cluster evidence. The global ceiling is again 8.
+  `cluster-qc` keeps every heatmap as a registered artifact but attaches only the overview
+  (typically three images); a heatmap is opened selectively when its table row remains ambiguous.
+  Only attached overview paths are required for visual review.
 
-Measured, not assumed: the legacy 28-heatmap set is 2.8 MiB raw / ~3.8 MiB base64 — already inside
-our existing 8 MiB `MODEL_MEDIA_TOTAL_BYTES`. Our own heatmaps are 22–33 KiB at 691x608 (a third of
-legacy's 1197px), so a 60-cluster set is ~2 MiB / ~34k image tokens. **Worst-case transport is
-unchanged** by the count increase: the payload ceiling was and remains `min(count x 2 MiB, 8 MiB)`
-= 8 MiB, so the byte budget was always the binding constraint. Beyond 64 figures `cluster-qc`
-degrades visibly — it names the un-attached heatmaps in the summary and `details.figures_not_attached`
-and tells the model to open them with `inspect-media`, rather than failing an expensive pass.
-
-Review schemas were deliberately **left alone**. Legacy carried no per-figure attestation and
-worked; the fix targeted immediacy, not stricter ceremony. `visual_findings` remains a flat list,
-so a terse attestation is still structurally possible — revisit only if immediacy proves
-insufficient in practice.
+Attached paths are now recorded as `shown_visual_artifacts` by the producing QC skill and
+automatically included by its review tool. The model supplies actual `visual_findings`, but no
+longer has to copy paths it was just shown or retry because of that bookkeeping. Cluster review
+requires every flagged cluster but permits extra well-supported notes instead of rejecting the
+whole review for harmless additional coverage.
 
 ## Figure comprehensiveness pass (implemented 2026-07-28)
 
@@ -377,8 +493,9 @@ tests confirmed raw-`X` QC (13 mitochondrial and 97 ribosomal genes, six QC figu
 - Sessions persist versioned metadata/state, append-only fsynced events, atomic checkpoints,
   runtime bindings, mirrored SDK turns, artifacts, failures, and replayable pending commits.
 - `scagent start --resume [session-id]` now prompts for Automatic, Exact, or Reconstructed
-  continuation. Automatic uses compatible SDK history while it fits and performs a single safe
-  conversation-epoch rollover when preflight usage or a provider context error says it does not.
+  continuation. Automatic uses compatible SDK history while it fits and performs repeated safe
+  conversation-epoch rollovers when preflight/live usage or a provider context error says it does
+  not.
   Exact never silently reconstructs; Reconstructed intentionally starts from durable state.
   Resume defaults to the session's recorded profile when it remains installed, preserving
   compatibility across changes to the project's default profile; an explicit `--profile` wins.
@@ -1269,6 +1386,30 @@ recorded `runtime.turn_interrupted` (`forced: false`), flushed the SDK transcrip
 turn on that session resumed in `exact` mode. Real Esc/arrow-key handling was exercised over a pty
 (bare Esc stops; arrow/function keys and typing are ignored). Not yet exercised live: an interrupt
 landing in the middle of a long GPU capability — that path is covered deterministically only.
+
+## Batch decision simplification (completed 2026-08-26)
+
+The OpenCode run `run_20260826T160028Z_8a415e` exposed avoidable batch-decision ceremony: a valid
+user choice required model-written `integration_basis` and `override_warning` prose, then integration
+and reclustering invalidated that choice and forced the expensive investigation/decision pair again.
+The repeated prose also promoted unsupported study-context claims into durable state.
+
+`batch-investigation` 0.8.0 now keeps the architecture but reduces the contract:
+
+- the public investigation schema is `path`, `batch_key`, `cluster_key`, and optional
+  `condition_keys`; scientific thresholds are versioned implementation details;
+- the decision schema is only current `evidence_id`, `keep_uncorrected|integrate|separate`, and a
+  short rationale; guidance leaves the decision unresolved and not-applicable evidence needs no
+  second call;
+- the complete evidence remains in `batch-evidence.json`, while state and inline tool details keep
+  only a compact recommendation/artifact pointer plus cell/count identities;
+- representation and clustering changes do not stale the once-made decision; cell or count changes
+  do; post-integration validation uses `score_integration` rather than another investigation;
+- `train_scvi_latent` now consumes the minimal `integration_authorized` floor, so the recorded
+  integrate choice gates the consequential operation without a prose-based override policy.
+
+Focused acceptance is in `batch_capability_test.py`, `floor_evaluator_test.py`,
+`decoupled_capabilities_test.py`, and `validate_batch_synthetic.py`.
 
 ## Scientific work after the P0 corrections
 

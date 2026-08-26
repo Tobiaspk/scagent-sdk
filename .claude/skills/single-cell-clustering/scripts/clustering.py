@@ -25,6 +25,18 @@ def _write_matrix(adata, path):
     else:
         adata.write_h5ad(path, compression="gzip")
 
+
+def _to_gpu(adata: Any) -> None:
+    from rapids_singlecell.get import anndata_to_GPU
+
+    anndata_to_GPU(adata, convert_all=True)
+
+
+def _to_cpu(adata: Any) -> None:
+    from rapids_singlecell.get import anndata_to_CPU
+
+    anndata_to_CPU(adata, convert_all=True)
+
 def _identity(kind: str, value: Any) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()
     return f"{kind}:sha256:{hashlib.sha256(encoded).hexdigest()}"
@@ -39,7 +51,7 @@ def _load(arguments: dict[str, Any]) -> tuple[Path, Any]:
 
 
 def cluster_cells(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
-    import scanpy as sc
+    import rapids_singlecell as rsc
 
     path, adata = _load(arguments)
     neighbors_key = str(arguments.get("neighbors_key", "neighbors"))
@@ -53,15 +65,16 @@ def cluster_cells(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
             f"obs column {cluster_key!r} already exists; choose a new cluster_key "
             "to avoid overwriting labels"
         )
-    sc.tl.leiden(
+    _to_gpu(adata)
+    rsc.tl.leiden(
         adata,
         resolution=resolution,
         key_added=cluster_key,
         neighbors_key=None if neighbors_key == "neighbors" else neighbors_key,
         random_state=seed,
-        flavor="igraph",
-        n_iterations=2,
+        n_iterations=100,
     )
+    _to_cpu(adata)
     labels = adata.obs[cluster_key].astype(str)
     metadata = dict(adata.uns.get("scagent_sdk", {}))
     representation_id = metadata.get("representation_id") or metadata.get("neighbor_graph_id")
@@ -81,6 +94,7 @@ def cluster_cells(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
             "cluster_key": cluster_key,
             "resolution": resolution,
             "random_seed": seed,
+            "compute_backend": "rapids_singlecell",
             "labels": sorted(
                 zip(map(str, adata.obs_names), map(str, labels), strict=True)
             ),
@@ -91,6 +105,7 @@ def cluster_cells(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
             "cell_set_id": cell_set_id,
             "representation_id": representation_id,
             "clustering_id": clustering_id,
+            "compute_backend": "rapids_singlecell",
             "clustering_key": cluster_key,
         }
     )
@@ -114,6 +129,7 @@ def cluster_cells(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
             "n_clusters": int(sizes.size),
             "cluster_sizes": {str(key): int(value) for key, value in sizes.items()},
             "clustering_id": clustering_id,
+            "compute_backend": "rapids_singlecell",
         },
         "facts_patch": {
             "analysis": {
@@ -181,7 +197,7 @@ def rank_groups(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     )
     table.to_csv(context.staging_dir / "ranked-genes.csv", index=False)
     output_name = "ranked-groups.zarr"
-    final_path = f"artifacts/capabilities/{context.execution_id}/{output_name}"
+    final_path = f"{context.artifact_relative_path}/{output_name}"
     _write_matrix(adata, context.staging_dir / output_name)
     evidence_id = _identity(
         "ranked-genes",
@@ -216,7 +232,7 @@ def rank_groups(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
                     "group_key": group_key,
                     "method": method,
                     "artifact_path": (
-                        f"artifacts/capabilities/{context.execution_id}/ranked-genes.csv"
+                        f"{context.artifact_relative_path}/ranked-genes.csv"
                     ),
                     "annotated_path": final_path,
                 }

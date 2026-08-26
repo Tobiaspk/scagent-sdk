@@ -1,7 +1,7 @@
 schema_version: 1
 skill:
   id: cluster-qc
-  version: "0.6.0"
+  version: "0.7.0"
   description: Artifact-scoped three-axis cluster quality evidence, complete figures, visual review, and optional bounded cleanup.
 tools:
   - name: evaluate_cluster_qc
@@ -16,7 +16,11 @@ tools:
         path: {type: string, description: Current prepared or integrated H5AD path.}
         cluster_key: {type: string, default: leiden}
         min_cluster_cells: {type: integer, minimum: 1, default: 20}
-        max_cells_for_silhouette: {type: integer, minimum: 100, default: 20000}
+        max_cells_for_silhouette:
+          type: integer
+          minimum: 100
+          default: 3000
+          description: Deterministic sample cap for exact silhouette, whose time and memory are quadratic in cells.
         doublet_enrichment_ratio: {type: number, minimum: 1, default: 2.0}
         doublet_rate_floor: {type: number, minimum: 0, maximum: 1, default: 0.1}
         n_structure_genes:
@@ -53,7 +57,7 @@ tools:
     primary_matrix_input: path
     primary_matrix_output: cluster-qc-filtered-raw-counts
   - name: review_cluster_qc
-    description: Record visual inspection of every cluster-QC figure and explicitly adjudicate each flagged cluster; non-keep dispositions remain unresolved until the requested mutation or reclustering occurs.
+    description: Record findings from the attached cluster-QC overview and explicitly adjudicate each flagged cluster; open per-cluster heatmaps selectively when ambiguity remains. Attached overview paths are recorded automatically.
     entrypoint: scripts/evaluate.py:review
     environment: current
     activity_label: Recording cluster QC review
@@ -63,9 +67,9 @@ tools:
         evidence_id: {type: string, minLength: 1}
         reviewed_artifacts:
           type: array
-          minItems: 1
           uniqueItems: true
           items: {type: string, minLength: 1}
+          default: []
         visual_findings:
           type: array
           minItems: 1
@@ -81,5 +85,5 @@ tools:
               rationale: {type: string, minLength: 1}
             required: [disposition, rationale]
             additionalProperties: false
-      required: [evidence_id, reviewed_artifacts, visual_findings, cluster_reviews]
+      required: [evidence_id, visual_findings, cluster_reviews]
       additionalProperties: false
