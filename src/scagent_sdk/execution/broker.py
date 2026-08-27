@@ -341,6 +341,8 @@ print(json.dumps({{
         label: str,
         timeout_seconds: float | None,
         progress: Callable[[str], None] | None = None,
+        stdout_sink: Path | None = None,
+        stderr_sink: Path | None = None,
     ) -> subprocess.CompletedProcess[str]:
         """Run one capability worker as an interruptible process group, streaming its output.
 
@@ -370,15 +372,19 @@ print(json.dumps({{
 
         out_chunks: list[bytes] = []
         err_chunks: list[bytes] = []
+        # Live sinks: append the worker's output to disk as it streams, so the log is readable while
+        # the job runs (not only rewritten at completion). Unbuffered so a watcher sees it promptly.
+        out_sink = open(stdout_sink, "wb", buffering=0) if stdout_sink is not None else None
+        err_sink = open(stderr_sink, "wb", buffering=0) if stderr_sink is not None else None
         readers = [
             threading.Thread(
                 target=self._pump_stream,
-                args=(process.stdout, out_chunks, progress),
+                args=(process.stdout, out_chunks, progress, out_sink),
                 daemon=True,
             ),
             threading.Thread(
                 target=self._pump_stream,
-                args=(process.stderr, err_chunks, progress),
+                args=(process.stderr, err_chunks, progress, err_sink),
                 daemon=True,
             ),
         ]
@@ -396,6 +402,10 @@ print(json.dumps({{
             # text; the process has exited (or been killed), so both reads have hit EOF.
             for reader in readers:
                 reader.join()
+            for sink in (out_sink, err_sink):
+                if sink is not None:
+                    with suppress(Exception):
+                        sink.close()
             with self._lock:
                 self._running.pop(execution_id, None)
                 cancelled = execution_id in self._cancelled
@@ -417,6 +427,7 @@ print(json.dumps({{
         stream: Any,
         chunks: list[bytes],
         progress: Callable[[str], None] | None,
+        sink: Any = None,
     ) -> None:
         """Drain one worker pipe, capturing every byte and forwarding progress-like fragments.
 
@@ -424,6 +435,10 @@ print(json.dumps({{
         buffer is split on both ``\\r`` and ``\\n`` to surface intermediate bar updates, not only
         completed lines. Only fragments that look like a bar/epoch counter are forwarded, and any
         failure in the callback is swallowed — telemetry must never break the compute.
+
+        ``sink`` (an open binary file) receives every byte as it arrives, so a long run's log is
+        visible on disk *while it runs* — not only rewritten at completion. This is what lets an
+        out-of-process watcher tail live progress; a sink write must never break the compute either.
         """
 
         raw = stream.raw if hasattr(stream, "raw") else stream
@@ -434,6 +449,10 @@ print(json.dumps({{
                 if not data:
                     break
                 chunks.append(data)
+                if sink is not None:
+                    with suppress(Exception):
+                        sink.write(data)
+                        sink.flush()
                 if progress is None:
                     continue
                 buffer += data
@@ -529,6 +548,8 @@ print(json.dumps({{
                 label=tool.name,
                 timeout_seconds=profile.timeout_seconds,
                 progress=progress,
+                stdout_sink=stdout_path,
+                stderr_sink=stderr_path,
             )
         except subprocess.TimeoutExpired as exc:
             input_path.unlink(missing_ok=True)
