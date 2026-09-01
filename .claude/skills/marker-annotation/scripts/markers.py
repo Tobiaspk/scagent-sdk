@@ -16,6 +16,7 @@ def _read_matrix(path):
 
     return ad.read_zarr(path) if str(path).endswith(".zarr") else ad.read_h5ad(path)
 
+
 def _identity(kind: str, value: Any) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()
     return f"{kind}:sha256:{hashlib.sha256(encoded).hexdigest()}"
@@ -365,39 +366,36 @@ def review_annotation_evidence(arguments: dict[str, Any], context: Any) -> dict[
         and value.get("status") == "complete"
         and value.get("clustering_id") == clustering_id
     }
-    methods = {str(value) for value in arguments.get("methods_reviewed", [])}
-    if "markers" not in methods:
-        raise ValueError("methods_reviewed must include DEG/marker evidence ('markers')")
+    requested_methods = {str(value) for value in arguments.get("methods_reviewed", [])}
+    methods = requested_methods or set(current)
+    if not methods:
+        raise ValueError("no current annotation evidence is available to review")
     absent = sorted(methods - set(current))
     if absent:
         raise ValueError(
-            "methods_reviewed contains absent or stale evidence: " + ", ".join(absent)
+            "methods_reviewed contains absent or stale evidence: "
+            + ", ".join(absent)
+            + "; current keys are: "
+            + ", ".join(sorted(current))
         )
     references = sorted(methods - {"markers"})
-    if not references:
-        raise ValueError("at least one current independent reference method must be reviewed")
     waiver_arg = arguments.get("reference_waiver")
     waiver = str(waiver_arg).strip() if waiver_arg is not None else None
-    if len(references) < 2 and not waiver:
-        raise ValueError(
-            "fewer than two independent reference methods requires a specific "
-            "reference_waiver explaining model unavailability or incompatibility"
-        )
     findings = [str(value).strip() for value in arguments.get("agreement_findings", [])]
-    if not findings or any(not value for value in findings):
-        raise ValueError("agreement_findings must contain at least one non-empty observation")
+    if any(not value for value in findings):
+        raise ValueError("agreement_findings must not contain empty observations")
     reviewed_artifacts = sorted(
         {str(value).strip() for value in arguments.get("reviewed_artifacts", [])}
     )
-    if not reviewed_artifacts or any(not value for value in reviewed_artifacts):
-        raise ValueError("reviewed_artifacts must name the DEG and reference evidence inspected")
+    if any(not value for value in reviewed_artifacts):
+        raise ValueError("reviewed_artifacts must not contain empty paths")
     unresolved = sorted(
         {str(value) for value in arguments.get("unresolved_clusters", [])}
     )
     review = {
-        "status": "resolved" if not unresolved else "action_required",
+        "status": "reviewed",
         "clustering_id": clustering_id,
-        "deg_primary": True,
+        "deg_primary": "markers" in methods,
         "methods_reviewed": sorted(methods),
         "evidence_ids": {
             method: current[method].get("evidence_id") for method in sorted(methods)
@@ -407,18 +405,17 @@ def review_annotation_evidence(arguments: dict[str, Any], context: Any) -> dict[
         "agreement_findings": findings,
         "reviewed_artifacts": reviewed_artifacts,
         "unresolved_clusters": unresolved,
-        "rationale": str(arguments["rationale"]).strip(),
+        "uncertain_clusters": unresolved,
+        "rationale": str(
+            arguments.get("rationale", "Reviewed the current annotation evidence.")
+        ).strip(),
     }
     if not review["rationale"]:
         raise ValueError("rationale must not be empty")
     return {
         "summary": (
-            f"Reviewed DEG evidence and {len(references)} independent reference method(s); "
-            + (
-                "annotation evidence is resolved for final adjudication."
-                if not unresolved
-                else f"{len(unresolved)} cluster(s) still require annotation work."
-            )
+            f"Reviewed {len(methods)} current annotation evidence method(s); "
+            f"{len(unresolved)} cluster(s) recorded as uncertain."
         ),
         "details": review,
         "facts_patch": {"annotation": {"review": review}},

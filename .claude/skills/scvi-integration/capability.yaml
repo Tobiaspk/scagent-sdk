@@ -1,7 +1,7 @@
 schema_version: 1
 skill:
   id: scvi-integration
-  version: "0.3.0"
+  version: "0.4.0"
   description: Standalone count-aware scVI latent-model training.
 tools:
   - name: train_scvi_latent
@@ -9,7 +9,6 @@ tools:
     entrypoint: scripts/integrate.py:run
     environment: scvi
     activity_label: Training scVI latent model
-    floors: [integration_authorized]
     input_schema:
       type: object
       properties:

@@ -1,8 +1,87 @@
 # Current project state
 
-Status date: 2026-08-25  
+Status date: 2026-08-26
 Authority: this is the concise source of truth for what exists now, what was actually verified,
 and what should happen next. Historical detail remains in `docs/handoff.md`.
+
+## Final annotation is model-planned, not a cross-workflow certification gate (2026-08-27)
+
+Run `run_20260827T180949Z_ba5557` completed, but final annotation exposed avoidable coupling rather
+than missing science: five annotation-review contract failures, repeated QC and batch work, and an
+exact-string DEG-label override requirement for 14 of 15 clusters. The strongest implementation
+defect was contradictory state behavior: the floor evaluator and its tests deliberately preserve a
+batch decision across reclustering, while `cluster_single_cells` emitted `"batch": None` and erased
+it. The repeated investigation reached the same no-integration conclusion.
+
+Final publication is now ungated. Its intrinsic safeguards remain: use the current clustering,
+cover every current cluster exactly once, write to a new annotation column, and preserve the input
+artifact. Only `labels` is required; confidence, rationales, DEG hypotheses, evidence summaries,
+and earlier-hypothesis notes are optional report enrichment. Annotation review infers current
+method keys when omitted, does not require a second reference or waiver, and records uncertain or
+unknown clusters as completed scientific judgments rather than unfinished work. Marker and
+reference skills continue to recommend useful evidence without becoming predecessors.
+
+Batch decision recording is also ungated because its handler already validates the current
+evidence ID and status locally. Reclustering no longer clears batch evidence or its decision.
+Cluster QC now keeps `identity_without_structure` without manufacturing a manual-review item:
+identity-supported DEGs plus weak covariance is common and weak covariance alone is not a defect.
+Consequential data-removal operations and stale/ancestor artifact protection remain guarded.
+
+## Targeted model runs remain model-planned (2026-08-26)
+
+OpenCode session `run_20260826T194106Z_2b6d65` asked only to run scVI. The model first chose the
+minimal sensible path—inspect/describe the input, materialize raw counts, then call
+`train_scvi_latent`—but the tool's `integration_authorized` floor rejected training and prescribed
+batch investigation plus a recorded decision. Because `investigate_batch` needs clusters, that
+single workflow floor pulled normalization, HVGs, PCA, neighbors, UMAP, and Leiden into a targeted
+model-training request. The later ancestor-artifact refusal was a secondary consequence of moving
+the active lineage head through those unrelated transformations.
+
+The floor audit found five gated operations. CellBender removal, accepting current doublet/batch
+review decisions, and final publication are consequential boundaries; scVI training was the lone
+ordinary model-compute operation with a predecessor floor, contradicting the existing policy that
+focused computation is directly callable when its intrinsic inputs are present.
+
+`scvi-integration` 0.4.0 therefore removes the training floor. `train_scvi_latent` still validates
+its real inputs—raw counts in `layers['counts']` and the requested `batch_key`—and produces a
+provenance-bearing candidate `X_scVI`, model, history, and convergence output. Its existing skill
+now says explicitly that a direct request should satisfy only those intrinsic inputs; batch
+investigation and adoption remain available scientific reasoning in a comprehensive analysis, not
+runtime prerequisites for executing the model. The unused `integration_authorized` evaluator was
+removed. No targeted mode, dependency DAG, new skill, or progressive-loading change was added.
+
+The authoring contract now rejects floors as tool-order machinery: floors are for accepting
+consequential decisions, separately attested high-impact operations, and certification/publication;
+ordinary measurement, transformation, training/inference, and comparison validate locally and
+remain model-planned. Focused manifest tests cover ungated scVI training and its minimal required
+schema. Skill instructions remain always-on for now; the observed model selected the narrow path
+before the floor intervened, so changing context loading is not yet evidence-supported.
+
+## Working Zarr artifacts and portable delivery are separate (2026-08-26)
+
+OpenCode session `run_20260826T210046Z_4b1dc9` correctly trained scVI directly, then made a
+model-driven choice to add neighbors, UMAP, a donor-colored plot, and an integration-mixing score.
+Those checks were not floor- or DAG-required, and the resulting `umap.zarr` preserved the upstream
+counts, metadata, and `X_scVI` while adding the graph and `X_umap`. The problem appeared at the
+delivery boundary: a later H5AD request had no focused export capability, so the model hand-wrote
+`run_analysis_code`, wrote an unregistered file outside the output-view directories, and silently
+removed graph arrays while retaining their metadata.
+
+`export-dataset` 0.1.0 adds one general, ungated `export_anndata` capability rather than a
+method-specific rule. It consumes the active or explicitly selected H5AD/Zarr artifact, preserves
+the complete AnnData structure, writes a gzip-compressed H5AD, verifies its round-trip structure
+and indices, and registers it as user-facing Data without advancing the analysis lineage head.
+Standing model guidance now treats Zarr as the efficient working version, exports H5AD at a real
+delivery boundary unless the work is continuing or the user requests another format, and avoids
+duplicating every intermediate.
+
+The same run exposed two independent infrastructure defects. The output view classified `.zarr`
+by suffix but rejected it with `is_file()`, so committed stores never appeared in
+`data/intermediates` or `outputs.md`; it now accepts declared Zarr directory stores and recognizes
+the emitted `application/vnd.zarr` media type. Resume recovery compared readable artifact-directory
+names such as `train-scvi-latent--<execution-id>` to state keys containing only `<execution-id>`,
+then quarantined valid committed results despite their staged events. Recovery now excludes the
+recorded committed paths and reads the authoritative execution ID from each staged `result.json`.
 
 ## Live parity repair: bounded reasoning, GPU core, and decision-ready rollover (2026-08-25)
 
@@ -1405,8 +1484,10 @@ The repeated prose also promoted unsupported study-context claims into durable s
   only a compact recommendation/artifact pointer plus cell/count identities;
 - representation and clustering changes do not stale the once-made decision; cell or count changes
   do; post-integration validation uses `score_integration` rather than another investigation;
-- `train_scvi_latent` now consumes the minimal `integration_authorized` floor, so the recorded
-  integrate choice gates the consequential operation without a prose-based override policy.
+- Batch decisions remain current across representation and clustering changes and are consumed by
+  comprehensive finalization; a later targeted-compute correction removed the
+  `integration_authorized` floor from `train_scvi_latent` because training a reversible candidate
+  representation is ordinary computation rather than acceptance of the batch decision.
 
 Focused acceptance is in `batch_capability_test.py`, `floor_evaluator_test.py`,
 `decoupled_capabilities_test.py`, and `validate_batch_synthetic.py`.

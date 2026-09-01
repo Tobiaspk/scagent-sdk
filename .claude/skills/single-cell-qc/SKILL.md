@@ -30,13 +30,46 @@ Library size and detected genes are drawn on log axes with log-spaced bins. Read
 those; a linear axis compresses the low tail into a few bars and hides the shape you are judging.
 
 Thresholds are dataset- and assay-dependent. A PBMC default is not automatically appropriate for
-nuclei, tumors, low-depth libraries, or large metabolically active cells. Prefer calculating and
-reviewing flags before filtering.
+nuclei, tumors, low-depth libraries, or large metabolically active cells. As starting points for
+*flagging*, mitochondrial fraction runs much lower in single-nucleus data (a few percent) than in
+whole cells (tens of percent), and a threshold copied across that boundary is meaningless.
+
+## Early QC is instrumentation, not surgery
+
+The flags this capability writes are measurements. Removal is a separate decision, and for cells it
+is normally made **after clustering**, in `cluster-qc`, not here:
+
+- A per-cell threshold cannot tell a dying cell from a real high-mitochondrial cell type.
+  Cardiomyocytes, hepatocytes, proximal tubule, and activated or secretory cells legitimately carry
+  a high mitochondrial fraction; low-complexity libraries are also normal for small resting cells.
+  Only the embedding shows whether the flagged cells form one coherent population — evidence of a
+  real failing subset — or are scattered through healthy clusters, where they are individual
+  measurement noise the clustering will absorb anyway.
+- Cluster context supplies evidence a per-cell cut cannot: whether the group has a discriminating
+  identity program, whether its gene-gene covariance is structured, whether doublet scores are
+  enriched in it. That is why doublet-flagged cells are kept in the object rather than deleted —
+  their *distribution across clusters* is the evidence.
+- Deleting the tail early also removes the evidence for the decision. After a pre-clustering cut,
+  the recalculated QC shows zero flagged cells, the QC review has nothing left to judge, and cluster
+  QC never sees the population that was removed. The cut becomes unauditable and unreviewable.
+
+So the ordinary path is: calculate flags → inspect every figure → `review_single_cell_qc` with a
+`keep_all` (or `request_guidance`) decision that says what the tail looks like and where it will be
+adjudicated → normalize/HVG/PCA/neighbors/UMAP → `plot_qc_embedding` → cluster at exploratory
+resolution → `evaluate_cluster_qc`, where removal is decided with three-axis evidence.
+
+`filter_single_cells` before clustering is a fallback, appropriate when the barcodes are
+unambiguously not cells (empty droplets, near-zero complexity debris), when a user or a source
+protocol specifies the cut, or when the flagged fraction is so large that the embedding itself would
+be dominated by debris. Take that path deliberately: review first, state the threshold and the count
+it removes, say why the cut is safe before cluster context exists, and then recalculate and review
+QC on the retained artifact. Do not filter first and review afterwards — the review must be able to
+change the outcome. The tool carries no threshold defaults precisely so that this stays a stated
+choice.
 
 A high flagged fraction is a question, not an automatic deletion. Compare threshold options,
 distribution shape, QC-on-embedding localization, doublet evidence, and later cluster coherence.
-Record why all cells are kept or which cells should be filtered. If filtering occurs, recalculate
-and review QC on the retained artifact.
+Record why all cells are kept or which cells should be filtered.
 
 Read [references/qc-contract.md](references/qc-contract.md) for metric definitions and mutation
 semantics.

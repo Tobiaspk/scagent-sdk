@@ -1,17 +1,14 @@
 schema_version: 1
 skill:
   id: finalize-analysis
-  version: "0.4.0"
-  description: Gated label adjudication and final artifact publication.
+  version: "0.5.0"
+  description: Publish a complete cluster-to-label mapping and final annotated artifact.
 tools:
   - name: finalize_analysis
-    description: Validate complete cluster labels and rationales, save final annotated AnnData and report, and mark the scientific session finalized.
+    description: Validate complete cluster labels, save a final annotated AnnData and report, and mark the scientific session finalized. QC, batch, and reference reviews are useful context rather than prerequisites.
     entrypoint: scripts/finalize.py:run
     environment: gpu-singlecell
     activity_label: Finalizing analysis
-    floors:
-      [dataset_identity, current_cell_qc_review, current_cluster_qc, batch_decision,
-       current_annotation_evidence]
     input_schema:
       type: object
       properties:
@@ -24,28 +21,37 @@ tools:
           additionalProperties: {type: string, minLength: 1}
         rationales:
           type: object
+          default: {}
+          description: Optional concise per-cluster rationale when it adds useful context.
           additionalProperties: {type: string, minLength: 1}
         deg_labels:
           type: object
-          description: Independently written label hypothesis derived from current cluster DEG/marker evidence.
+          default: {}
+          description: Optional independently written DEG-derived hypotheses retained for provenance.
           additionalProperties: {type: string, minLength: 1}
         evidence_summaries:
           type: object
-          description: Per-cluster synthesis naming DEG markers and independent reference evidence.
+          default: {}
+          description: Optional per-cluster evidence summaries.
           additionalProperties: {type: string, minLength: 1}
         confidence:
           type: object
+          default: {}
+          description: Optional per-cluster confidence. Omitted values are reported as not specified.
           additionalProperties: {type: string, enum: [high, medium, low]}
         overrides:
           type: object
           default: {}
-          description: Required per-cluster justification whenever the final label differs from deg_labels.
+          description: Optional notes for substantive evidence-based changes from an earlier hypothesis.
           additionalProperties: {type: string, minLength: 1}
-        analysis_summary: {type: string, minLength: 1}
+        analysis_summary:
+          type: string
+          minLength: 1
+          default: Finalized cluster annotation.
         caveats:
           type: array
           items: {type: string}
-      required: [labels, rationales, deg_labels, evidence_summaries, confidence, analysis_summary]
+      required: [labels]
       additionalProperties: false
     primary_matrix_input: path
     primary_matrix_output: final-annotated-anndata

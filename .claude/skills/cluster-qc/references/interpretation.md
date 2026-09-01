@@ -23,9 +23,10 @@
   for review, because "metric-clean" is not "coherent" (a homotypic-doublet or noise mixture can
   have normal library size, genes, and MT). The coherence axis surfaces it; it does not
   auto-remove it.
-- Preserve conflicts. `junk_markers_but_structured`, `identity_without_structure`, and
-  `conflicting` are kept and investigated. A missing or `inconclusive` axis is never treated as
-  agreement.
+- Preserve real conflicts. `junk_markers_but_structured` and `conflicting` are kept and
+  investigated. `identity_without_structure` is kept without mandatory review because weak
+  covariance alone is not evidence of a defect. A missing or `inconclusive` axis is never treated
+  as agreement.
 
 ## Other signals
 

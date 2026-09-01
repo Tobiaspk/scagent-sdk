@@ -1,11 +1,11 @@
 schema_version: 1
 skill:
   id: single-cell-qc
-  version: "0.2.0"
+  version: "0.3.0"
   description: Comprehensive flag-first QC, visual review, and explicit filtering operations.
 tools:
   - name: calculate_single_cell_qc
-    description: Calculate count-derived cell and gene QC metrics, add threshold flags, and save evidence without removing cells or genes.
+    description: "Calculate count-derived cell and gene QC metrics, add threshold flags, and save evidence without removing cells or genes. min_genes/max_genes/max_pct_mito here only write Boolean flag columns and figures - they are instrumentation, and nothing is deleted."
     entrypoint: scripts/qc.py:calculate_qc
     environment: gpu-singlecell
     activity_label: Calculating single-cell QC
@@ -50,7 +50,7 @@ tools:
       required: [assessment_id, decision, rationale, visual_findings]
       additionalProperties: false
   - name: filter_single_cells
-    description: Apply explicit detected-gene and mitochondrial thresholds to a count-bearing H5AD, saving a new artifact and cell-set identity.
+    description: "Apply explicit detected-gene and mitochondrial thresholds to a count-bearing H5AD, saving a new artifact and cell-set identity. Global threshold filtering is the fallback, not the standard path: cell removal is normally decided at the cluster level after clustering, where a low-quality population can be told apart from real biology with a high mitochondrial fraction. Use this for unambiguous empty/debris barcodes, for a user- or source-specified protocol, or after a review whose rationale states why the cut is safe before clustering."
     entrypoint: scripts/qc.py:filter_cells
     environment: gpu-singlecell
     activity_label: Filtering single cells
@@ -64,9 +64,9 @@ tools:
           default: auto
           description: "'auto' uses layers['counts'] when present and otherwise validates X; null explicitly uses X."
         organism: {type: string, enum: [human, mouse], default: human}
-        min_genes: {type: [integer, "null"], minimum: 0, default: 200}
+        min_genes: {type: [integer, "null"], minimum: 0, default: null, description: "No default: state the cut you intend. The flag thresholds used for QC evidence are instrumentation and are not carried over into deletion."}
         max_genes: {type: [integer, "null"], minimum: 1, default: null}
-        max_pct_mito: {type: [number, "null"], minimum: 0, maximum: 100, default: 20}
+        max_pct_mito: {type: [number, "null"], minimum: 0, maximum: 100, default: null, description: "No default. A mitochondrial cut applied before clustering deletes real high-MT biology (cardiomyocytes, hepatocytes, activated or secretory cells) along with dying cells; prefer flagging now and deciding at the cluster level."}
         confirm_filtering: {type: boolean, description: Explicit confirmation that this operation changes the cell set.}
       required: [confirm_filtering]
       additionalProperties: false

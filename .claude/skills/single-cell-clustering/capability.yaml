@@ -1,7 +1,7 @@
 schema_version: 1
 skill:
   id: single-cell-clustering
-  version: "0.2.0"
+  version: "0.3.0"
   description: Independent Leiden clustering and group-wise gene ranking.
 tools:
   - name: cluster_single_cells
@@ -16,8 +16,12 @@ tools:
         path: {type: string}
         neighbors_key: {type: string, default: neighbors}
         cluster_key: {type: string, default: leiden}
-        resolution: {type: number, exclusiveMinimum: 0, default: 0.8}
+        resolution:
+          type: number
+          exclusiveMinimum: 0
+          description: "Leiden granularity. There is no default: state it deliberately for the phase you are in (exploratory QC clustering is coarse-blind and wants a high value; the annotation clustering wants interpretable granularity). Read the skill instructions before choosing."
         random_seed: {type: integer, default: 0}
+      required: [resolution]
       additionalProperties: false
     primary_matrix_input: path
     primary_matrix_output: clustered-anndata

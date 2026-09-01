@@ -16,6 +16,12 @@ by `batch_key`. It validates those intrinsic inputs, trains the model, and saves
 - training history;
 - an H5AD with `obsm["X_scVI"]`.
 
+Training is a reversible representation experiment, not a batch-handling decision or a claim that
+the latent should replace the current analysis representation. For a direct request to run scVI,
+satisfy only those intrinsic inputs and train. Ask for the batch key only when the user's choice or
+the dataset metadata does not resolve it; do not require an exploratory clustering or batch
+investigation merely to execute the model.
+
 `X_scVI` can be supplied explicitly to later representation and clustering operations.
 
 `score_integration` verifies a correction after training: it computes per-cell neighborhood batch

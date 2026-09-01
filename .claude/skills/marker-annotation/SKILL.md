@@ -21,15 +21,18 @@ not a plasma cell without immunoglobulin/secretory markers (`MZB1`, `JCHAIN`, `S
 `CLEC4C`, `IRF7`/`TCF4`) is present. Predicted-doublet enrichment is probabilistic barcode evidence
 for review, never a cell-type label.
 
-Use at least one independent reference method when an appropriate model exists, then finalize through the gated finalization capability.
+Use an independent reference when it is appropriate and likely to add information. Strong marker
+evidence does not need a ceremonial second model, and reference inference does not replace weak or
+conflicting biology.
 
-For a comprehensive analysis, use both CellTypist and SCimilarity when appropriate models are
-ready, visualize their agreement, and call `review_annotation_evidence`. If only one method is
-compatible, record a specific waiver. DEGs are the primary label hypothesis; reference labels,
+For a comprehensive analysis, CellTypist and SCimilarity can be useful when appropriate models are
+ready, but neither is mandatory. `review_annotation_evidence` is an optional concise checkpoint; it
+infers current evidence keys when they are omitted and can record ambiguous clusters without
+blocking finalization. DEGs are usually the primary label hypothesis; reference labels,
 curated programs, Cytopus-covered marker knowledge, and atlas queries corroborate or challenge it.
 For human data, keep `use_cytopus=true` unless the package is unavailable or the user explicitly
 opts out. The capability records whether the knowledge base loaded and which programs contributed;
 Cytopus augments marker hypotheses but does not replace cluster DEGs as the primary evidence.
-Do not mark the evidence resolved while any cluster remains ambiguous.
+Preserve ambiguity as uncertainty or an unknown/general label instead of forcing resolution.
 
 Read [references/evidence-standard.md](references/evidence-standard.md) for label-strength expectations and the pDC-versus-plasma discriminator.

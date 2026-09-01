@@ -177,24 +177,6 @@ class FloorEvaluator:
                 "Run investigate_batch, ask the user once, then record keep_uncorrected, "
                 "integrate, or separate. Not-applicable evidence needs no second decision call.",
             )
-        if floor == "integration_authorized":
-            evidence = self._batch_evidence(facts)
-            decision = self._batch_decision(facts)
-            if (
-                isinstance(decision, dict)
-                and isinstance(evidence, dict)
-                and decision.get("decision") == "integrate"
-                and decision.get("evidence_id") == evidence.get("evidence_id")
-                and self._batch_identities_current(facts, evidence)
-            ):
-                return None
-            return FloorFailure(
-                floor,
-                "The current batch-handling choice does not authorize integration for these cells "
-                "and counts.",
-                "Investigate batch structure, ask the user, then record decision='integrate' "
-                "against the current evidence.",
-            )
         if floor == "current_annotation_evidence":
             clustering_id = self._clustering_id(facts)
             annotation = facts.get("annotation")

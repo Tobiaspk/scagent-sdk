@@ -175,6 +175,13 @@ def test_synthesis_structured_identity_is_kept() -> None:
     assert synth("clean", "identity_supported", "strong")["action"] == "keep"
 
 
+def test_synthesis_identity_with_weak_structure_is_kept() -> None:
+    synth = _g("synthesize_decision")
+    result = synth("clean", "identity_supported", "weak")
+    assert result["synthesis"] == "identity_without_structure"
+    assert result["action"] == "keep"
+
+
 def test_synthesis_junk_but_structured_is_reviewed() -> None:
     synth = _g("synthesize_decision")
     result = synth("obvious", "junk_markers", "strong")

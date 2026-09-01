@@ -49,30 +49,17 @@ def _valid_contract(clusters: set[str]) -> dict[str, dict[str, str]]:
 # --- manifest contract ------------------------------------------------------
 
 
-def test_manifest_is_strict_gpu_routed_and_fully_floored() -> None:
+def test_manifest_is_gpu_routed_ungated_and_labels_only_required() -> None:
     package = _package()
     tool = next(tool for tool in package.manifest.tools if tool.name == "finalize_analysis")
     assert tool.environment == "gpu-singlecell"
-    assert set(tool.floors) == {
-        "dataset_identity",
-        "current_cell_qc_review",
-        "current_cluster_qc",
-        "batch_decision",
-        "current_annotation_evidence",
-    }
+    assert tool.floors == ()
     assert tool.input_schema["additionalProperties"] is False
     # ``path`` is the declared matrix input and therefore optional; finalization runs against the
     # active lineage artifact unless one is named explicitly.
     assert tool.primary_matrix_input == "path"
     assert tool.primary_matrix_output == "final-annotated-anndata"
-    assert set(tool.input_schema["required"]) == {
-        "labels",
-        "rationales",
-        "deg_labels",
-        "evidence_summaries",
-        "confidence",
-        "analysis_summary",
-    }
+    assert set(tool.input_schema["required"]) == {"labels"}
 
 
 # --- pure label contract ----------------------------------------------------
@@ -121,21 +108,11 @@ def test_bad_confidence_enum_is_rejected() -> None:
         _validator()(clusters=clusters, **contract)
 
 
-def test_final_vs_deg_mismatch_without_override_is_rejected() -> None:
+def test_final_vs_deg_mismatch_does_not_require_string_override() -> None:
     clusters = {"0", "1"}
     contract = _valid_contract(clusters)
     contract["labels"]["0"] = "pDC"
     contract["deg_labels"]["0"] = "plasma cell"
-    with pytest.raises(ValueError, match="override of the independent DEG label"):
-        _validator()(clusters=clusters, **contract)
-
-
-def test_mismatch_with_override_passes() -> None:
-    clusters = {"0", "1"}
-    contract = _valid_contract(clusters)
-    contract["labels"]["0"] = "pDC"
-    contract["deg_labels"]["0"] = "plasma cell"
-    contract["overrides"] = {"0": "LILRA4/IL3RA present, no immunoglobulin; pDC over plasma"}
     _validator()(clusters=clusters, **contract)
 
 
@@ -153,7 +130,7 @@ def test_empty_override_justification_is_rejected() -> None:
     contract["labels"]["0"] = "pDC"
     contract["deg_labels"]["0"] = "plasma cell"
     contract["overrides"] = {"0": "   "}
-    with pytest.raises(ValueError, match="override justifications must not be empty"):
+    with pytest.raises(ValueError, match="overrides values must not be empty"):
         _validator()(clusters=clusters, **contract)
 
 
@@ -234,12 +211,12 @@ def test_fresh_and_complete_inputs_pass() -> None:
     )
 
 
-def test_analysis_summary_must_not_be_empty() -> None:
+def test_labels_only_contract_gets_lightweight_defaults() -> None:
     resolve = _handler().__globals__["_resolve_arguments"]
-    clusters = {"0", "1"}
-    arguments = {"analysis_summary": "   ", **_valid_contract(clusters)}
-    with pytest.raises(ValueError, match="analysis_summary must not be empty"):
-        resolve(arguments)
+    parsed = resolve({"labels": {"0": "T cell", "1": "unknown"}})
+    assert parsed["summary"] == "Finalized cluster annotation."
+    assert parsed["rationales"] == {}
+    assert parsed["confidence"] == {}
 
 
 # --- envelope assembly ------------------------------------------------------

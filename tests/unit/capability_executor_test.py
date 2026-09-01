@@ -51,6 +51,9 @@ def test_capability_result_is_staged_then_committed_by_hook(tmp_path: Path) -> N
     assert (session.directory / artifact["path"] / "inspection.json").is_file()
     kinds = [event.kind for event in session.store.events()]
     assert kinds[-2:] == ["capability.result_staged", "capability.result_committed"]
+    assert executor.recover_pending() == []
+    assert (session.directory / artifact["path"] / "inspection.json").is_file()
+    assert not executor.quarantine_root.exists()
 
 
 def test_session_relative_artifact_path_is_resolved_for_the_next_tool(
@@ -128,7 +131,7 @@ tools:
     assert (executor.pending_root / execution_id / "details.json").is_file()
 
     pending = executor.pending_root / execution_id
-    final = executor.artifact_root / execution_id
+    final = session.directory / response["structuredContent"]["artifact_relative_path"]
     final.parent.mkdir(parents=True, exist_ok=True)
     pending.rename(final)
     assert executor.recover_pending() == [execution_id]
@@ -158,15 +161,18 @@ def test_executor_enforces_scientific_floors_without_sdk_hook(tmp_path: Path) ->
     package = next(
         item
         for item in CapabilityRegistry(skills_root).discover()
-        if item.manifest.skill_id == "finalize-analysis"
+        if item.manifest.skill_id == "cellbender-background-removal"
+    )
+    tool = next(
+        item for item in package.manifest.tools if item.name == "remove_ambient_background"
     )
     session = AnalysisSession.create(tmp_path / "sessions", title="defense in depth")
 
     response = asyncio.run(
         CapabilityExecutor(session).execute(
             package,
-            package.manifest.tools[0],
-            {"path": str(tmp_path / "unmaterialized.h5ad")},
+            tool,
+            {"path": str(tmp_path / "raw_feature_bc_matrix.h5")},
         )
     )
 
@@ -175,7 +181,7 @@ def test_executor_enforces_scientific_floors_without_sdk_hook(tmp_path: Path) ->
     assert "scientific floor denied execution" in response["content"][0]["text"]
     # ...but the terminal gets a single concise line.
     summary = response["error_summary"]
-    assert summary.startswith("finalize_analysis failed:")
+    assert summary.startswith("remove_ambient_background failed:")
     assert "\n" not in summary
 
 

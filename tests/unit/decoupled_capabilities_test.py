@@ -90,11 +90,12 @@ def test_reference_inference_does_not_require_clustering_or_qc() -> None:
     assert "summarize_celltypist_by_cluster" in celltypist
 
 
-def test_scvi_training_is_representation_only_and_requires_integrate_choice() -> None:
+def test_scvi_training_is_representation_only_and_ungated() -> None:
     package = _packages()["scvi-integration"]
     tool = package.manifest.tools[0]  # type: ignore[union-attr]
     assert tool.name == "train_scvi_latent"
-    assert tool.floors == ("integration_authorized",)
+    assert tool.floors == ()
+    assert set(tool.input_schema["required"]) == {"batch_key"}
     assert "resolution" not in tool.input_schema["properties"]
 
 
@@ -103,6 +104,22 @@ def test_marker_computation_is_not_gated_by_cluster_qc() -> None:
     tool = package.manifest.tools[0]  # type: ignore[union-attr]
     assert tool.name == "evaluate_marker_evidence"
     assert tool.floors == ()
+
+
+def test_final_publication_is_not_coupled_to_optional_reviews() -> None:
+    package = _packages()["finalize-analysis"]
+    tool = package.manifest.tools[0]  # type: ignore[union-attr]
+    assert tool.name == "finalize_analysis"
+    assert tool.floors == ()
+    assert set(tool.input_schema["required"]) == {"labels"}
+
+
+def test_reclustering_does_not_erase_batch_evidence() -> None:
+    source = (
+        Path(__file__).parents[2]
+        / ".claude/skills/single-cell-clustering/scripts/clustering.py"
+    ).read_text(encoding="utf-8")
+    assert '"batch": None' not in source
 
 
 def test_evidence_generation_is_portable_but_decisions_remain_bound() -> None:
@@ -114,7 +131,7 @@ def test_evidence_generation_is_portable_but_decisions_remain_bound() -> None:
         },
         "batch-investigation": {
             "investigate_batch": (),
-            "decide_batch_handling": ("current_batch_evidence",),
+            "decide_batch_handling": (),
         },
         "cellbender-background-removal": {
             "validate_cellbender_input": (),

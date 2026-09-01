@@ -600,9 +600,17 @@ def filter_cells(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     layer_arg = arguments.get("counts_layer", "auto")
     layer = str(layer_arg) if layer_arg is not None else None
     organism = str(arguments.get("organism", "human"))
-    min_arg = arguments.get("min_genes", 200)
+    # Deliberately no threshold defaults on the mutating tool: the flag thresholds on
+    # calculate_single_cell_qc are instrumentation, and inheriting them here would let a
+    # bare call delete the mitochondrial tail as a side effect of a default.
+    min_arg = arguments.get("min_genes")
     max_arg = arguments.get("max_genes")
-    mito_arg = arguments.get("max_pct_mito", 20)
+    mito_arg = arguments.get("max_pct_mito")
+    if min_arg is None and max_arg is None and mito_arg is None:
+        raise ValueError(
+            "no threshold requested: state min_genes, max_genes, and/or max_pct_mito "
+            "explicitly when removing cells (this tool has no default thresholds)"
+        )
     thresholds = {
         "min_genes": int(min_arg) if min_arg is not None else None,
         "max_genes": int(max_arg) if max_arg is not None else None,

@@ -23,7 +23,7 @@ def _handler(skill: str, tool_name: str) -> Any:
 def test_qc_defaults_to_auto_and_exposes_review_tool() -> None:
     package = _packages()["single-cell-qc"]
     tools = {tool.name: tool for tool in package.manifest.tools}
-    assert package.manifest.version == "0.2.0"
+    assert package.manifest.version == "0.3.0"
     assert tools["calculate_single_cell_qc"].input_schema["properties"]["counts_layer"][
         "default"
     ] == "auto"
@@ -165,7 +165,7 @@ def test_cluster_review_accepts_extra_well_supported_cluster_notes_and_shown_ove
     assert set(result["details"]["cluster_reviews"]) == {"2", "7"}
 
 
-def test_annotation_review_requires_second_reference_or_specific_waiver() -> None:
+def test_annotation_review_accepts_one_reference_and_preserves_uncertainty() -> None:
     review = _handler("marker-annotation", "review_annotation_evidence")
     context = SimpleNamespace(
         state_facts={
@@ -190,11 +190,30 @@ def test_annotation_review_requires_second_reference_or_specific_waiver() -> Non
         "methods_reviewed": ["markers", "scimilarity"],
         "reviewed_artifacts": ["cluster-deg.csv", "scimilarity-clusters.csv"],
         "agreement_findings": ["DEGs and SCimilarity agree at broad lineage level."],
-        "unresolved_clusters": [],
+        "unresolved_clusters": ["2"],
         "rationale": "Labels remain DEG-led.",
     }
-    with pytest.raises(ValueError, match="reference_waiver"):
-        review(arguments, context)
-    arguments["reference_waiver"] = "No compatible cached CellTypist model exists."
     result = review(arguments, context)
-    assert result["facts_patch"]["annotation"]["review"]["status"] == "resolved"
+    fact = result["facts_patch"]["annotation"]["review"]
+    assert fact["status"] == "reviewed"
+    assert fact["uncertain_clusters"] == ["2"]
+
+
+def test_annotation_review_infers_current_method_keys() -> None:
+    review = _handler("marker-annotation", "review_annotation_evidence")
+    context = SimpleNamespace(
+        state_facts={
+            "analysis": {"clustering": {"id": "clusters-a"}},
+            "annotation": {
+                "evidence": {
+                    "markers": {
+                        "status": "complete",
+                        "clustering_id": "clusters-a",
+                        "evidence_id": "markers-a",
+                    }
+                }
+            },
+        }
+    )
+    result = review({}, context)
+    assert result["details"]["methods_reviewed"] == ["markers"]

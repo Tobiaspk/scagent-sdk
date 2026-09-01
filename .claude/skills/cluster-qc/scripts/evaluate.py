@@ -271,7 +271,10 @@ def synthesize_decision(
     if junk and strong:
         return {"synthesis": "junk_markers_but_structured", "action": "review"}
     if identity and weak:
-        return {"synthesis": "identity_without_structure", "action": "review"}
+        # Weak covariance is common in valid small, transitional, or trajectory-associated
+        # populations. Once identity DEGs are supported, it is not an independent defect and
+        # should not manufacture a manual-review queue.
+        return {"synthesis": "identity_without_structure", "action": "keep"}
     if axis_inconclusive:
         return {"synthesis": "inconclusive", "action": "review"}
     return {"synthesis": "conflicting", "action": "review"}

@@ -1,9 +1,4 @@
-# Claude update — P0 corrective pass
-
-Date: 2026-07-22
-Scope: audit + implementation of the five P0 corrective items in `docs/current-state.md`.
-Status: all five corrected with direct deterministic tests; deterministic-science items also passed
-one bounded brokered live run. Nothing committed or pushed.
+what i
 
 ## Final baseline
 

@@ -88,9 +88,14 @@ resampling edge rather than at the ceiling. The durable result
 stores only artifact metadata and paths. Normalize arbitrary input through `inspect-media` rather
 than returning an unchecked file directly.
 
-`floors` names independent state predicates evaluated by PreToolUse. Add a floor only for a
-consequential action and add deny/allow/staleness tests with it. `activity_label` supplies the Rich
-terminal text used in `▶ …` and `✓ … done` lines.
+`floors` names independent state predicates evaluated by PreToolUse. Add a floor only when the
+tool accepts a consequential decision, performs a high-impact operation that needs a separate
+suitability attestation, or certifies/publishes a result. Do not floor ordinary measurement,
+transformation, model training/inference, or comparison: those tools validate their intrinsic
+inputs locally, and the model decides how to satisfy them from the user's request and current
+artifact. A floor must not encode a tool-order workflow or use remediation to prescribe a pipeline.
+Add deny/allow/staleness tests for every floor. `activity_label` supplies the Rich terminal text
+used in `▶ …` and `✓ … done` lines.
 
 If the skill cannot run without a host asset it will never download — a cached reference model —
 declare a readiness probe so the model is told what exists instead of searching for it:

@@ -56,7 +56,15 @@ def cluster_cells(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     path, adata = _load(arguments)
     neighbors_key = str(arguments.get("neighbors_key", "neighbors"))
     cluster_key = str(arguments.get("cluster_key", "leiden"))
-    resolution = float(arguments.get("resolution", 0.8))
+    if arguments.get("resolution") is None:
+        # Deliberately no default. Granularity is a scientific choice that differs by phase
+        # (high for exploratory cluster QC, interpretable for annotation), and an inherited
+        # convention value silently decides it. See SKILL.md / references/clustering-contract.md.
+        raise ValueError(
+            "resolution is required: state the Leiden granularity for the phase you are in "
+            "rather than accepting a default (see the single-cell-clustering instructions)"
+        )
+    resolution = float(arguments["resolution"])
     seed = int(arguments.get("random_seed", 0))
     if neighbors_key not in adata.uns:
         raise ValueError(f"neighbor graph {neighbors_key!r} is absent")
@@ -147,7 +155,6 @@ def cluster_cells(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
                 },
             },
             "cluster_qc": None,
-            "batch": None,
             "annotation": None,
             "finalization": None,
         },

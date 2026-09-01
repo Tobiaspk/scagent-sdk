@@ -212,9 +212,9 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
                 "clustering": None,
             },
             "cluster_qc": None,
-            # The batch fact is preserved: the integrate/keep decision was made once on the
-            # uncorrected pass and authorized this training; integration is its consequence, not a
-            # trigger to re-decide. Post-integration mixing is verified by score_integration.
+            # Preserve any existing batch evidence or decision. Training a candidate latent is
+            # independent of adopting it; a full analysis can still use that evidence when it
+            # later decides whether and how to interpret the representation.
             "annotation": None,
             "finalization": None,
         },

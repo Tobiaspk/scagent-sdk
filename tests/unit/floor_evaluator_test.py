@@ -483,29 +483,3 @@ def test_not_applicable_current_evidence_needs_no_second_decision(tmp_path: Path
     _seed_analysis_identities(session, clustering_id="cluster-a")
     _record_batch(session, decision=None, clustering_id="cluster-a", status="not_applicable")
     assert evaluator.evaluate(session.store.state, "batch_decision") is None
-
-
-def test_integration_authorized_requires_current_integrate_choice(tmp_path: Path) -> None:
-    session = AnalysisSession.create(tmp_path / "sessions", title="integration floor")
-    evaluator = FloorEvaluator()
-    _seed_analysis_identities(session, clustering_id="cluster-a")
-
-    _record_batch(session, decision="keep_uncorrected", clustering_id="cluster-a")
-    assert evaluator.evaluate(session.store.state, "integration_authorized") is not None
-
-    _record_batch(session, decision="integrate", clustering_id="cluster-a")
-    assert evaluator.evaluate(session.store.state, "integration_authorized") is None
-
-    # Re-clustering on the (integrated) representation does not revoke the authorization: it is
-    # keyed to the cells/counts, not the clustering. A cell-set change (a cleanup) does.
-    session.store.record(
-        "test.recluster",
-        state_patch={"facts": {"analysis": {"clustering": {"id": "cluster-b"}}}},
-    )
-    assert evaluator.evaluate(session.store.state, "integration_authorized") is None
-
-    session.store.record(
-        "test.cleanup",
-        state_patch={"facts": {"analysis": {"cell_set": {"id": "cells-b"}}}},
-    )
-    assert evaluator.evaluate(session.store.state, "integration_authorized") is not None

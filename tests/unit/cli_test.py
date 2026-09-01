@@ -56,11 +56,11 @@ def test_cli_lists_and_validates_capabilities(capsys) -> None:
     validation = json.loads(capsys.readouterr().out)
     readiness = validation.pop("readiness")
     assert validation == {
-        "executable_skills": 22,
-        "skills": 23,
+        "executable_skills": 23,
+        "skills": 24,
         "skills_root": str(skills_root.resolve()),
         "status": "pass",
-        "tools": 52,
+        "tools": 53,
     }
     # Reference-model availability is host state, so assert the inventory's shape, not its verdict.
     assert {report["skill_id"] for report in readiness} == {
