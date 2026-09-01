@@ -1,4 +1,4 @@
-"""Publish a final annotated dataset after runtime floors have passed."""
+"""Publish a complete label mapping for the current clustered artifact."""
 
 from __future__ import annotations
 
@@ -10,6 +10,13 @@ from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import recipe  # noqa: E402  (sibling module; path inserted above)
+
+
+def _read_matrix(path):
+    """Read an AnnData artifact, tolerating both .h5ad files and .zarr stores (ADR 0011)."""
+    import anndata as ad
+
+    return ad.read_zarr(path) if str(path).endswith(".zarr") else ad.read_h5ad(path)
 
 
 def _exact_mapping(mapping: dict[str, str], clusters: set[str], name: str) -> None:
@@ -34,26 +41,21 @@ def _validate_label_contract(
     confidence: dict[str, str],
     overrides: dict[str, str],
 ) -> None:
+    _exact_mapping(labels, clusters, "labels")
     for name, mapping in (
-        ("labels", labels),
         ("rationales", rationales),
         ("deg_labels", deg_labels),
         ("evidence_summaries", evidence_summaries),
         ("confidence", confidence),
+        ("overrides", overrides),
     ):
-        _exact_mapping(mapping, clusters, name)
+        unknown = sorted(set(mapping) - clusters)
+        if unknown:
+            raise ValueError(f"{name} contains unknown clusters: {unknown}")
+        if not all(value.strip() for value in mapping.values()):
+            raise ValueError(f"{name} values must not be empty")
     if not set(confidence.values()).issubset({"high", "medium", "low"}):
         raise ValueError("confidence values must be high, medium, or low")
-    mismatches = {cluster for cluster in clusters if labels[cluster] != deg_labels[cluster]}
-    if not mismatches.issubset(overrides):
-        raise ValueError(
-            "every final-label override of the independent DEG label needs a justification: "
-            + ", ".join(sorted(mismatches - set(overrides)))
-        )
-    if not set(overrides).issubset(clusters):
-        raise ValueError("overrides contains unknown clusters")
-    if not all(value.strip() for value in overrides.values()):
-        raise ValueError("override justifications must not be empty")
 
 
 def _resolve_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -62,19 +64,29 @@ def _resolve_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
     cluster_key = str(arguments.get("cluster_key", "leiden"))
     label_key = str(arguments.get("label_key", "cell_type"))
     labels = {str(key): str(value).strip() for key, value in arguments["labels"].items()}
-    rationales = {str(key): str(value).strip() for key, value in arguments["rationales"].items()}
-    deg_labels = {str(key): str(value).strip() for key, value in arguments["deg_labels"].items()}
-    evidence_summaries = {
-        str(key): str(value).strip() for key, value in arguments["evidence_summaries"].items()
+    rationales = {
+        str(key): str(value).strip()
+        for key, value in arguments.get("rationales", {}).items()
     }
-    confidence = {str(key): str(value).strip() for key, value in arguments["confidence"].items()}
+    deg_labels = {
+        str(key): str(value).strip()
+        for key, value in arguments.get("deg_labels", {}).items()
+    }
+    evidence_summaries = {
+        str(key): str(value).strip()
+        for key, value in arguments.get("evidence_summaries", {}).items()
+    }
+    confidence = {
+        str(key): str(value).strip()
+        for key, value in arguments.get("confidence", {}).items()
+    }
     overrides = {
         str(key): str(value).strip() for key, value in arguments.get("overrides", {}).items()
     }
-    summary = str(arguments["analysis_summary"]).strip()
+    summary = str(arguments.get("analysis_summary", "Finalized cluster annotation.")).strip()
     caveats = [str(item) for item in arguments.get("caveats", [])]
     if not summary:
-        raise ValueError("analysis_summary must not be empty")
+        summary = "Finalized cluster annotation."
     return {
         "cluster_key": cluster_key,
         "label_key": label_key,
@@ -305,6 +317,9 @@ def _render_report(
 
     batch_evidence = batch.get("evidence", {}) if isinstance(batch, dict) else {}
     batch_decision = batch.get("decision", {}) if isinstance(batch, dict) else {}
+    recorded_batch_decision = batch_decision.get("decision", "not recorded")
+    if batch_evidence.get("status") == "not_applicable":
+        recorded_batch_decision = "not_applicable"
     lines.extend(
         [
             "",
@@ -312,7 +327,7 @@ def _render_report(
             "",
             f"- Evidence status: `{batch_evidence.get('status', 'not recorded')}`",
             f"- Recommendation: `{batch_evidence.get('recommendation', 'not recorded')}`",
-            f"- Decision: `{batch_decision.get('decision', 'not recorded')}`",
+            f"- Decision: `{recorded_batch_decision}`",
             f"- Rationale: {batch_decision.get('rationale', 'not recorded')}",
             "",
             "## Annotation evidence and adjudication",
@@ -340,10 +355,16 @@ def _render_report(
         ]
     )
     for row in table.sort_values("cluster").itertuples(index=False):
-        evidence = (
-            f"{evidence_summaries[row.cluster]} Rationale: {rationales[row.cluster]} "
-            f"Override: {row.override_justification}"
-        ).replace("|", "\\|").replace("\n", " ")
+        evidence_parts = []
+        if evidence_summaries[row.cluster]:
+            evidence_parts.append(evidence_summaries[row.cluster])
+        if rationales[row.cluster]:
+            evidence_parts.append("Rationale: " + rationales[row.cluster])
+        if row.override_justification:
+            evidence_parts.append("Earlier-hypothesis note: " + row.override_justification)
+        evidence = (" ".join(evidence_parts) or "Not separately recorded.").replace(
+            "|", "\\|"
+        ).replace("\n", " ")
         lines.append(
             f"| {row.cluster} | {row.deg_label} | {row.cell_type} | {row.confidence} | "
             f"{row.n_cells} | {evidence} |"
@@ -389,7 +410,7 @@ def _execute_finalization(arguments: dict[str, Any], context: Any) -> dict[str, 
     summary = parsed["summary"]
 
     path = Path(str(arguments["path"])).expanduser().resolve()
-    adata = sc.read_h5ad(path)
+    adata = _read_matrix(path)
     existing_columns = set(map(str, adata.obs.columns))
     clusters = (
         set(map(str, adata.obs[cluster_key].astype(str).unique()))
@@ -412,6 +433,15 @@ def _execute_finalization(arguments: dict[str, Any], context: Any) -> dict[str, 
         input_clustering_id=input_clustering_id,
         current_clustering_id=current_clustering_id,
     )
+
+    # Only labels are required. Optional evidence fields remain useful in reports when supplied,
+    # but missing entries do not turn publication into a second annotation-review workflow.
+    rationales = {cluster: rationales.get(cluster, "") for cluster in clusters}
+    deg_labels = {cluster: deg_labels.get(cluster, "") for cluster in clusters}
+    evidence_summaries = {
+        cluster: evidence_summaries.get(cluster, "") for cluster in clusters
+    }
+    confidence = {cluster: confidence.get(cluster, "not specified") for cluster in clusters}
 
     for caveat in _auto_caveats(context.state_facts, confidence):
         if caveat not in caveats:
@@ -470,7 +500,7 @@ def _execute_finalization(arguments: dict[str, Any], context: Any) -> dict[str, 
         {
             "tool": "finalize_analysis",
             "skill": "finalize-analysis",
-            "skill_version": "0.4.0",
+            "skill_version": "0.5.0",
             "arguments": arguments,
         }
     )
@@ -532,8 +562,8 @@ def _execute_finalization(arguments: dict[str, Any], context: Any) -> dict[str, 
             "media_type": "image/png",
         }
     )
-    final_path = f"artifacts/capabilities/{context.execution_id}/final-annotated.h5ad"
-    report_path = f"artifacts/capabilities/{context.execution_id}/analysis-report.md"
+    final_path = f"{context.artifact_relative_path}/final-annotated.h5ad"
+    report_path = f"{context.artifact_relative_path}/analysis-report.md"
     artifacts = [
         {
             "name": "final-annotated-anndata",

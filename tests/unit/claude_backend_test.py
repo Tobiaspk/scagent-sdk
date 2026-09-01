@@ -44,6 +44,11 @@ class AssistantMessage:
 
 
 @dataclass
+class UserMessage:
+    content: list
+
+
+@dataclass
 class ResultMessage:
     session_id: str = "sdk-session"
     result: str = "final"
@@ -88,6 +93,9 @@ class FakeClient:
             "isAutoCompactEnabled": True,
         }
 
+    async def interrupt(self):
+        return None
+
     async def receive_response(self):
         yield AssistantMessage(
             [
@@ -108,6 +116,7 @@ def _sdk():
         ToolUseBlock=ToolUseBlock,
         ToolResultBlock=ToolResultBlock,
         AssistantMessage=AssistantMessage,
+        UserMessage=UserMessage,
         ResultMessage=ResultMessage,
     )
 
@@ -143,6 +152,7 @@ def test_claude_backend_builds_isolated_resumable_sdk_options(tmp_path: Path) ->
     assert options.system_prompt == "System"
     assert options.resume == "sdk-old"
     assert options.fork_session is True
+    assert options.session_store_flush == "eager"
     assert options.tools == []
     assert options.strict_mcp_config is True
     assert options.skills == []
@@ -484,3 +494,51 @@ def test_exact_resume_preflight_uses_advertised_context_window_before_query(
     assert captured.value.total_tokens == 230_145
     assert captured.value.source == "upstream:models"
     assert ContextClient.queried is False
+
+
+def test_live_context_rollover_stops_after_a_committed_tool_result(tmp_path: Path) -> None:
+    class LiveContextClient(FakeClient):
+        instances: list = []
+
+        def __init__(self, *, options):
+            super().__init__(options=options)
+            self.interrupted = False
+            type(self).instances.append(self)
+
+        async def get_context_usage(self):
+            return {
+                "totalTokens": 230_145,
+                "maxTokens": 230_000,
+                "rawMaxTokens": 262_144,
+            }
+
+        async def interrupt(self):
+            self.interrupted = True
+
+        async def receive_response(self):
+            yield SystemMessage("init", {"session_id": "sdk-live-full"})
+            yield AssistantMessage([ToolUseBlock("tool-1", "science", {})])
+            # Capability PostToolUse has committed the scientific state before this user-side
+            # result frame reaches the model runtime.
+            yield UserMessage([ToolResultBlock("tool-1", {"ok": True})])
+
+    sdk = _sdk()
+    sdk.ClaudeSDKClient = LiveContextClient
+    sdk.SystemMessage = SystemMessage
+    request = RuntimeRequest(
+        **{
+            **_plain_request(tmp_path).__dict__,
+            "context_window_tokens": 262_144,
+            "max_output_tokens": 32_000,
+            "context_limit_source": "upstream:models",
+        }
+    )
+    backend = ClaudeAgentSDKBackend(sdk_module=sdk)
+
+    with pytest.raises(ContextRolloverRequired) as captured:
+        asyncio.run(backend.execute(request))
+
+    assert captured.value.total_tokens == 230_145
+    assert captured.value.context_window_tokens == 262_144
+    assert LiveContextClient.instances[-1].interrupted is True
+    assert backend.last_runtime_session_id == "sdk-live-full"

@@ -23,6 +23,23 @@ INTERMEDIATE_COMPRESSION = "gzip"
 INTERMEDIATE_COMPRESSION_OPTS = 2
 
 
+def _read_matrix(path):
+    """Read an AnnData artifact, tolerating both .h5ad files and .zarr stores (ADR 0011)."""
+    import anndata as ad
+
+    return ad.read_zarr(path) if str(path).endswith(".zarr") else ad.read_h5ad(path)
+
+
+def _write_matrix(adata, path):
+    """Write an AnnData artifact: a .zarr store (blosc) or a gzipped .h5ad file (ADR 0011)."""
+    import anndata as ad
+
+    if str(path).endswith(".zarr"):
+        ad.settings.zarr_write_format = 2  # v2 until the v3 sharding/dedup design lands
+        adata.write_zarr(path)
+    else:
+        adata.write_h5ad(path, compression="gzip")
+
 def _identity(kind: str, value: Any) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()
     return f"{kind}:sha256:{hashlib.sha256(encoded).hexdigest()}"
@@ -85,7 +102,7 @@ def _read(path: Path, sc: Any) -> Any:
     if path.is_dir():
         return sc.read_10x_mtx(path, var_names="gene_symbols", cache=False)
     if path.suffix.lower() == ".h5ad":
-        return sc.read_h5ad(path)
+        return _read_matrix(path)
     if path.suffix.lower() in {".h5", ".hdf5"}:
         return sc.read_10x_h5(path)
     raise ValueError("supported inputs are H5AD, 10x H5, or a 10x Matrix Market directory")
@@ -245,12 +262,8 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
         }
     )
     adata.uns["scagent_sdk"] = metadata
-    output_name = "counts-ready.h5ad"
-    adata.write_h5ad(
-        context.staging_dir / output_name,
-        compression=INTERMEDIATE_COMPRESSION,
-        compression_opts=INTERMEDIATE_COMPRESSION_OPTS,
-    )
+    output_name = "counts-ready.zarr"
+    _write_matrix(adata, context.staging_dir / output_name)
 
     report = {
         "requested_source": source,
@@ -315,7 +328,7 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
             {
                 "name": "count-ready-anndata",
                 "relative_path": output_name,
-                "media_type": "application/x-hdf5",
+                "media_type": "application/vnd.zarr",
             },
             {
                 "name": "count-source-selection",

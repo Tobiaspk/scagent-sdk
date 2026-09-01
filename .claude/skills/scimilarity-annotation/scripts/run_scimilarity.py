@@ -36,6 +36,23 @@ __all__ = [
 ]
 
 
+def _read_matrix(path):
+    """Read an AnnData artifact, tolerating both .h5ad files and .zarr stores (ADR 0011)."""
+    import anndata as ad
+
+    return ad.read_zarr(path) if str(path).endswith(".zarr") else ad.read_h5ad(path)
+
+
+def _write_matrix(adata, path):
+    """Write an AnnData artifact: a .zarr store (blosc) or a gzipped .h5ad file (ADR 0011)."""
+    import anndata as ad
+
+    if str(path).endswith(".zarr"):
+        ad.settings.zarr_write_format = 2  # v2 until the v3 sharding/dedup design lands
+        adata.write_zarr(path)
+    else:
+        adata.write_h5ad(path, compression="gzip")
+
 def _vote_confidence(stats: Any, *, weighting: bool, n_obs: int) -> dict[str, Any]:
     """Per-cell kNN vote margins, named for what they mean rather than for SCimilarity's columns.
 
@@ -78,12 +95,11 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     import anndata as ad
     import numpy as np
     import pandas as pd
-    import scanpy as sc
     from scimilarity import CellAnnotation
     from scimilarity.utils import align_dataset, lognorm_counts
 
     path = Path(str(arguments["path"])).expanduser().resolve()
-    if not path.is_file():
+    if not path.exists():
         raise FileNotFoundError(path)
     organism = declared_organism(arguments)
     model_path = resolve_model(arguments)
@@ -95,7 +111,7 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     weighting = bool(arguments.get("weighting", False))
     requested_celltypes = arguments.get("target_celltypes") or None
 
-    adata = sc.read_h5ad(path)
+    adata = _read_matrix(path)
     counts, count_source = _select_counts(adata, counts_layer)
     _validate_counts(counts, label=count_source)
     species = verify_species(
@@ -213,9 +229,9 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
         }
     )
     adata.uns["scagent_sdk"] = metadata
-    output_name = "scimilarity-annotated.h5ad"
-    final_path = f"artifacts/capabilities/{context.execution_id}/{output_name}"
-    adata.write_h5ad(context.staging_dir / output_name, compression="gzip")
+    output_name = "scimilarity-annotated.zarr"
+    final_path = f"{context.artifact_relative_path}/{output_name}"
+    _write_matrix(adata, context.staging_dir / output_name)
     columns: dict[str, Any] = {
         "cell": adata.obs_names.astype(str),
         "prediction": predicted.to_numpy(),
@@ -304,7 +320,7 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
             {
                 "name": "scimilarity-annotated-anndata",
                 "relative_path": output_name,
-                "media_type": "application/x-hdf5",
+                "media_type": "application/vnd.zarr",
             },
             {
                 "name": "scimilarity-cell-predictions",
@@ -322,14 +338,13 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
 
 def summarize_by_cluster(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     import pandas as pd
-    import scanpy as sc
 
     path = Path(str(arguments["path"])).expanduser().resolve()
-    if not path.is_file():
+    if not path.exists():
         raise FileNotFoundError(path)
     cluster_key = str(arguments["cluster_key"])
     prediction_key = str(arguments.get("prediction_key", "scimilarity_prediction"))
-    adata = sc.read_h5ad(path)
+    adata = _read_matrix(path)
     if cluster_key not in adata.obs:
         raise ValueError(f"cluster key {cluster_key!r} is absent")
     if prediction_key not in adata.obs:
@@ -411,7 +426,7 @@ def summarize_by_cluster(arguments: dict[str, Any], context: Any) -> dict[str, A
                         "prediction_key": prediction_key,
                         "cluster_predictions": predictions,
                         "artifact_path": (
-                            f"artifacts/capabilities/{context.execution_id}/"
+                            f"{context.artifact_relative_path}/"
                             "scimilarity-cluster-predictions.csv"
                         ),
                     }

@@ -46,8 +46,8 @@ def probe(environment: dict[str, str] | None = None) -> dict[str, Any]:
     if len(models) > len(listed):
         details.append(f"{len(models) - len(listed)} further cached models not listed")
     details.append(
-        "Pass any of these filenames as `model`; Immune_All_Low.pkl is the default, not a "
-        "universal choice. Uncached models cannot be downloaded."
+        "Pass the closest organism/tissue classifier explicitly as `model`; there is no generic "
+        "default. Uncached models cannot be downloaded."
     )
     return {
         "status": "ready",

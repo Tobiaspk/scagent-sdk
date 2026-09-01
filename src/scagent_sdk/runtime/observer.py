@@ -26,9 +26,19 @@ class RuntimeObserver(Protocol):
         context_window_tokens: int | None,
     ) -> None: ...
 
+    def on_context_compacted(
+        self,
+        *,
+        summary: str,
+        tokens_before: int,
+        tokens_after: int,
+    ) -> None: ...
+
     def on_message(self, message: RuntimeMessage) -> None: ...
 
     def on_tool_started(self, activity: ToolActivity) -> None: ...
+
+    def on_tool_progress(self, activity: ToolActivity, text: str) -> None: ...
 
     def on_tool_finished(self, activity: ToolActivity, summary: str | None) -> None: ...
 
@@ -54,10 +64,22 @@ class NullRuntimeObserver:
     ) -> None:
         pass
 
+    def on_context_compacted(
+        self,
+        *,
+        summary: str,
+        tokens_before: int,
+        tokens_after: int,
+    ) -> None:
+        pass
+
     def on_message(self, message: RuntimeMessage) -> None:
         pass
 
     def on_tool_started(self, activity: ToolActivity) -> None:
+        pass
+
+    def on_tool_progress(self, activity: ToolActivity, text: str) -> None:
         pass
 
     def on_tool_finished(self, activity: ToolActivity, summary: str | None) -> None:

@@ -27,4 +27,10 @@ SCimilarity output and dataset metadata to establish likely context, then choose
 organism/tissue/disease CellTypist model (for example an intestinal or colorectal model for CRC)
 and state why it is appropriate.
 
+When one cached model is clearly closest to an already established organism and tissue, select it
+and run it without asking the user to choose a filename. Ask only when the scientific context is
+still unresolved or two plausible models encode materially different scopes that would change the
+interpretation. There is no generic runtime default: the `model` argument must always make the
+choice explicit in provenance.
+
 Read [references/model-selection.md](references/model-selection.md).

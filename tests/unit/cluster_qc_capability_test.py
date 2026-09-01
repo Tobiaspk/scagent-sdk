@@ -30,7 +30,9 @@ def _g(name: str) -> Any:
 
 def test_manifest_bumped_and_declares_three_axis_parameters() -> None:
     package = _package()
-    assert package.manifest.version == "0.6.0"
+    assert package.manifest.version == "0.7.0"
+    tool = next(tool for tool in package.manifest.tools if tool.name == "evaluate_cluster_qc")
+    assert tool.input_schema["properties"]["max_cells_for_silhouette"]["default"] == 3000
     assert {tool.name for tool in package.manifest.tools} == {
         "evaluate_cluster_qc",
         "review_cluster_qc",
@@ -171,6 +173,13 @@ def test_synthesis_metric_clean_junk_is_reviewed_not_removed() -> None:
 def test_synthesis_structured_identity_is_kept() -> None:
     synth = _g("synthesize_decision")
     assert synth("clean", "identity_supported", "strong")["action"] == "keep"
+
+
+def test_synthesis_identity_with_weak_structure_is_kept() -> None:
+    synth = _g("synthesize_decision")
+    result = synth("clean", "identity_supported", "weak")
+    assert result["synthesis"] == "identity_without_structure"
+    assert result["action"] == "keep"
 
 
 def test_synthesis_junk_but_structured_is_reviewed() -> None:

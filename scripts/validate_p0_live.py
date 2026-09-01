@@ -4,8 +4,8 @@ Runs real brokered compute on Iris to validate, without the model loop:
 
 1. standalone H5AD raw-count source resolution and normalized-input refusal; and
 2. batch-decision identity binding recorded by ``investigate_batch`` and honored by the
-   ``batch_decision`` / ``integration_authorized`` floors (P0 #2), plus a real render of the
-   batch-composition figure (P0 #3).
+   ``batch_decision`` final-publication floor (P0 #2), plus a real render of the batch-composition
+   figure (P0 #3).
 
 This is a live-compute check. It does not by itself establish model behavior or biological
 generality. It intentionally avoids CellBender/scVI training.

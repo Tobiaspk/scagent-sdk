@@ -28,6 +28,7 @@ _CONTEXT_ERROR_MARKERS = (
     "prompt is too long",
     "too many input tokens",
 )
+MAX_CONTEXT_ROLLOVERS_PER_TURN = 8
 
 
 class AgentRuntimeService:
@@ -47,6 +48,10 @@ class AgentRuntimeService:
 
     @staticmethod
     def _effective_prompt(user_prompt: str, context: str, mode: ResumeMode) -> str:
+        if mode is ResumeMode.FRESH:
+            # New session, nothing to resume: hand the model its request directly, with no
+            # checkpoint preamble. Skill/capability instructions are injected separately.
+            return user_prompt.strip()
         if mode is ResumeMode.FORK:
             continuation = (
                 "This is a fork of an earlier model conversation. Preserve recorded scientific "
@@ -260,61 +265,83 @@ class AgentRuntimeService:
             fork_session=plan.mode is ResumeMode.FORK,
         )
         try:
-            try:
-                response = await self.backend.execute(request)
-            except ContextRolloverRequired as exc:
+            rollover_count = 0
+            while True:
+                try:
+                    response = await self.backend.execute(request)
+                except ContextRolloverRequired as exc:
+                    if preference is ResumePreference.EXACT:
+                        raise RuntimeExecutionError(
+                            f"{exc}. Exact resume was selected; reopen the session and choose "
+                            "automatic or reconstructed resume."
+                        ) from exc
+                    if rollover_count >= MAX_CONTEXT_ROLLOVERS_PER_TURN:
+                        raise RuntimeExecutionError(
+                            "the model conversation repeatedly exhausted its context window "
+                            f"during one turn ({MAX_CONTEXT_ROLLOVERS_PER_TURN} rollovers)"
+                        ) from exc
+                    reason = "runtime context reached its reserve during the active turn"
+                    old_runtime_session_id = (
+                        getattr(self.backend, "last_runtime_session_id", None)
+                        or request.resume_session_id
+                    )
+                    self._record_rollover(
+                        session,
+                        turn_id=turn_id,
+                        profile=profile,
+                        old_runtime_session_id=old_runtime_session_id,
+                        reason=reason,
+                        details=exc.to_dict(),
+                    )
+                    self._notify_rollover(reason=reason, details=exc.to_dict())
+                    rollover_count += 1
+                    request = self._reconstructed_request(
+                        session,
+                        user_prompt=user_prompt,
+                        profile=profile,
+                        cwd=cwd,
+                    )
+                    continue
+
+                if not self._is_context_error(response):
+                    break
                 if preference is ResumePreference.EXACT:
                     raise RuntimeExecutionError(
-                        f"{exc}. Exact resume was selected; reopen the session and choose "
-                        "automatic or reconstructed resume."
-                    ) from exc
-                self._record_rollover(
-                    session,
-                    turn_id=turn_id,
-                    profile=profile,
-                    old_runtime_session_id=plan.runtime_session_id,
-                    reason="preflight usage reached the model's context reserve",
-                    details=exc.to_dict(),
-                )
-                self._notify_rollover(
-                    reason="preflight usage reached the model's context reserve",
-                    details=exc.to_dict(),
-                )
-                request = self._reconstructed_request(
-                    session,
-                    user_prompt=user_prompt,
-                    profile=profile,
-                    cwd=cwd,
-                )
-                response = await self.backend.execute(request)
-
-            if self._is_context_error(response):
-                if preference is ResumePreference.EXACT or request.resume_session_id is None:
-                    raise RuntimeExecutionError(
                         "the model rejected the turn because its context window is full. "
-                        "Reopen the session and choose reconstructed resume."
+                        "Exact resume was selected; reopen the session and choose automatic "
+                        "or reconstructed resume."
                     )
+                if rollover_count >= MAX_CONTEXT_ROLLOVERS_PER_TURN:
+                    raise RuntimeExecutionError(
+                        "the model repeatedly rejected reconstructed conversations as over its "
+                        f"context window ({MAX_CONTEXT_ROLLOVERS_PER_TURN} rollovers)"
+                    )
+                reason = "provider rejected the active transcript as over its context window"
+                old_runtime_session_id = (
+                    response.runtime_session_id
+                    or getattr(self.backend, "last_runtime_session_id", None)
+                    or request.resume_session_id
+                )
+                details = {
+                    "subtype": response.subtype,
+                    "error": response.final_text[-4000:],
+                }
                 self._record_rollover(
                     session,
                     turn_id=turn_id,
                     profile=profile,
-                    old_runtime_session_id=request.resume_session_id,
-                    reason="provider rejected the exact transcript as over its context window",
-                    details={
-                        "subtype": response.subtype,
-                        "error": response.final_text[-4000:],
-                    },
+                    old_runtime_session_id=old_runtime_session_id,
+                    reason=reason,
+                    details=details,
                 )
-                self._notify_rollover(
-                    reason="provider rejected the exact transcript as over its context window",
-                )
+                self._notify_rollover(reason=reason, details=details)
+                rollover_count += 1
                 request = self._reconstructed_request(
                     session,
                     user_prompt=user_prompt,
                     profile=profile,
                     cwd=cwd,
                 )
-                response = await self.backend.execute(request)
         except asyncio.CancelledError:
             self._record_interrupted(
                 session,
@@ -351,7 +378,6 @@ class AgentRuntimeService:
             self._first_turn = False
             return response
 
-        # A second error is not retried: rollover is deliberately single-shot.
         if response.is_error:
             session.store.record(
                 "runtime.turn_failed",

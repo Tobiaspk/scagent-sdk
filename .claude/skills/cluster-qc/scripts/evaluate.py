@@ -30,11 +30,6 @@ CLUSTER_QC_EVIDENCE_SCHEMA = 3
 
 # --- versioned gene classification -------------------------------------------
 GENE_CLASS_VERSION = "cluster-qc-gene-class-v1"
-# Mirrors scagent_sdk.capabilities.results.MODEL_MEDIA_LIMIT. Skills cannot import the runtime
-# package, so the ceiling is restated here; exceeding it would fail the whole pass, and this
-# pass is expensive.
-MAX_ATTACHED_FIGURES = 64
-
 _NUISANCE_PATTERNS = tuple(
     re.compile(pattern)
     for pattern in (
@@ -93,6 +88,23 @@ _BROAD_CONTEXT_GENES = frozenset(
     }
 )
 
+
+def _read_matrix(path):
+    """Read an AnnData artifact, tolerating both .h5ad files and .zarr stores (ADR 0011)."""
+    import anndata as ad
+
+    return ad.read_zarr(path) if str(path).endswith(".zarr") else ad.read_h5ad(path)
+
+
+def _write_matrix(adata, path):
+    """Write an AnnData artifact: a .zarr store (blosc) or a gzipped .h5ad file (ADR 0011)."""
+    import anndata as ad
+
+    if str(path).endswith(".zarr"):
+        ad.settings.zarr_write_format = 2  # v2 until the v3 sharding/dedup design lands
+        adata.write_zarr(path)
+    else:
+        adata.write_h5ad(path, compression="gzip")
 
 def gene_class(gene: str) -> str:
     """Classify a gene symbol as ``nuisance``, ``broad``, or ``discriminating``."""
@@ -259,7 +271,10 @@ def synthesize_decision(
     if junk and strong:
         return {"synthesis": "junk_markers_but_structured", "action": "review"}
     if identity and weak:
-        return {"synthesis": "identity_without_structure", "action": "review"}
+        # Weak covariance is common in valid small, transitional, or trajectory-associated
+        # populations. Once identity DEGs are supported, it is not an independent defect and
+        # should not manufacture a manual-review queue.
+        return {"synthesis": "identity_without_structure", "action": "keep"}
     if axis_inconclusive:
         return {"synthesis": "inconclusive", "action": "review"}
     return {"synthesis": "conflicting", "action": "review"}
@@ -314,9 +329,19 @@ def _safe_group(value: str) -> str:
 
 def _dataset_fingerprint(path: Path) -> str:
     digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
+    # A .zarr artifact is a store directory (ADR 0011): hash each member by its in-store path and
+    # content rather than open() the directory (which raises IsADirectoryError). A plain file hashes
+    # exactly as before.
+    if path.is_dir():
+        members = sorted(item for item in path.rglob("*") if item.is_file())
+    else:
+        members = [path]
+    for member in members:
+        if path.is_dir():
+            digest.update(f"{member.relative_to(path).as_posix()}\0".encode())
+        with member.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
     return f"sha256:{digest.hexdigest()}"
 
 
@@ -341,11 +366,14 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:  # noqa: C90
     from sklearn.metrics import silhouette_samples
 
     path = Path(str(arguments["path"])).expanduser().resolve()
-    if not path.is_file():
+    if not path.exists():
         raise FileNotFoundError(path)
     cluster_key = str(arguments.get("cluster_key", "leiden"))
     min_cells = int(arguments.get("min_cluster_cells", 20))
-    max_cells_sil = int(arguments.get("max_cells_for_silhouette", 20000))
+    # Exact silhouette is quadratic in sampled cells. Twenty thousand cells implies roughly
+    # 400 million pair distances and dominated the live QC runtime. A deterministic 3k sample is
+    # ample for a cluster-separation warning while reducing that work by about 44x.
+    max_cells_sil = int(arguments.get("max_cells_for_silhouette", 3000))
     doublet_ratio = float(arguments.get("doublet_enrichment_ratio", 2.0))
     doublet_floor = float(arguments.get("doublet_rate_floor", 0.1))
     n_structure_genes = int(arguments.get("n_structure_genes", 150))
@@ -363,7 +391,7 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:  # noqa: C90
     max_cells_structure = int(arguments.get("max_cells_for_structure", 3000))
     seed = int(arguments.get("random_seed", 0))
 
-    adata = sc.read_h5ad(path)
+    adata = _read_matrix(path)
     if cluster_key not in adata.obs:
         raise ValueError(f"cluster key {cluster_key!r} is absent")
     provenance = adata.uns.get("scagent_sdk", {})
@@ -651,7 +679,7 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:  # noqa: C90
                 "moran_local_mt": moran_mt if n_cluster >= moran_min_cells else None,
                 "moran_local_lib": moran_lib if n_cluster >= moran_min_cells else None,
                 "heatmap_path": (
-                    f"artifacts/capabilities/{context.execution_id}/{heatmap_rel}"
+                    f"{context.artifact_relative_path}/{heatmap_rel}"
                     if heatmap_rel
                     else None
                 ),
@@ -772,6 +800,7 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:  # noqa: C90
         "representation_id": ident["representation_id"],
         "count_representation_id": ident["count_representation_id"],
         "n_clusters": int(sizes.size),
+        "n_cells_sampled_for_silhouette": int(len(indices)),
         "gene_class_version": GENE_CLASS_VERSION,
         "doublet_signal_missing": doublet_signal_missing,
         "global_predicted_doublet_rate": global_doublet_rate,
@@ -832,19 +861,13 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:  # noqa: C90
         *umap_media,
         *heatmap_artifacts,
     ]
-    # Every figure this pass requires a review of is attached, including all per-cluster
-    # heatmaps. Truncating here made the review floor unsatisfiable from what the model had
-    # actually seen: it required all of them but was shown at most a handful, so it reopened
-    # the rest one by one after being blocked. The coherent clusters are not padding — they
-    # are the negative controls that make an unstructured mixture obvious by contrast.
-    # At ~30 KiB each the whole set is around 2 MiB, well inside the transport budget.
+    # The overview is the immediate model decision surface. Per-cluster heatmaps remain complete
+    # registered artifacts behind the deterministic cluster table, but replaying one image per
+    # cluster consumed most of the context in repeated QC rounds. A reviewer can selectively open
+    # a heatmap when the overview/table leaves a specific cluster ambiguous.
     overview_media = ([metric_figure] if metric_figure else []) + umap_media
-    attachable = max(0, MAX_ATTACHED_FIGURES - len(overview_media))
-    model_media = overview_media + heatmap_artifacts[:attachable]
-    # A clustering fine enough to exceed the transport ceiling degrades visibly rather than
-    # failing the pass: the model is told exactly which heatmaps it has not been shown, so it
-    # can open them with `inspect-media` instead of silently reviewing from their absence.
-    unattached = [item["relative_path"] for item in heatmap_artifacts[attachable:]]
+    model_media = overview_media
+    heatmap_paths = [item["relative_path"] for item in heatmap_artifacts]
 
     if cleanup["applied"]:
         return _apply_cleanup(
@@ -876,16 +899,10 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:  # noqa: C90
             f"Attested three-axis QC for {sizes.size} clusters; "
             f"{len(cleanup['confirmed_junk'])} convergent-junk, "
             f"{len(review_clusters)} for review; {len(warnings)} warning(s). "
-            f"{len(model_media)} figure(s) attached for review."
-            + (
-                f" {len(unattached)} heatmap(s) exceeded the attachment ceiling and were NOT "
-                "shown; open each with `inspect-media` before `review_cluster_qc`: "
-                + ", ".join(unattached)
-                if unattached
-                else ""
-            )
+            f"{len(model_media)} overview figure(s) attached; "
+            f"{len(heatmap_paths)} per-cluster heatmap(s) remain available for selective review."
         ),
-        "details": {**common_details, "figures_not_attached": unattached},
+        "details": {**common_details, "available_cluster_heatmaps": heatmap_paths},
         "facts_patch": {
             "cluster_qc": {
                 "status": "attested",
@@ -901,15 +918,18 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:  # noqa: C90
                 "review_clusters": common_details["review_clusters"],
                 "review_status": "pending",
                 "required_visual_artifacts": [
-                    f"artifacts/capabilities/{context.execution_id}/{item['relative_path']}"
-                    for item in (
-                        ([metric_figure] if metric_figure else [])
-                        + umap_media
-                        + heatmap_artifacts
-                    )
+                    f"{context.artifact_relative_path}/{item['relative_path']}"
+                    for item in overview_media
+                ],
+                "shown_visual_artifacts": [
+                    f"{context.artifact_relative_path}/{item['relative_path']}"
+                    for item in overview_media
+                ],
+                "available_cluster_heatmaps": [
+                    f"{context.artifact_relative_path}/{path}" for path in heatmap_paths
                 ],
                 "artifact_path": (
-                    f"artifacts/capabilities/{context.execution_id}/{output_prefix}/"
+                    f"{context.artifact_relative_path}/{output_prefix}/"
                     "cluster-qc-decision-table.csv"
                 ),
             }
@@ -1174,10 +1194,16 @@ def _render_umap(
         )
         if column in adata.obs
     )
-    sc.pl.umap(adata, color=colors, ncols=3, show=False)
+    axes = sc.pl.umap(adata, color=colors, ncols=3, show=False)
+    # Rasterize the per-cell point clouds (as the cluster grid below already does): a vector
+    # scatter of tens of thousands of cells across several panels produces a PNG that overruns
+    # the executor's 2 MiB per-figure model_media cap and discards the whole result.
+    for axis in axes if isinstance(axes, list) else [axes]:
+        for collection in getattr(axis, "collections", []):
+            collection.set_rasterized(True)
     relative = f"{output_prefix}/cluster-qc-umap.png"
     (context.staging_dir / output_prefix).mkdir(parents=True, exist_ok=True)
-    plt.savefig(context.staging_dir / relative, dpi=160, bbox_inches="tight")
+    plt.savefig(context.staging_dir / relative, dpi=120, bbox_inches="tight")
     plt.close("all")
     media = [
         {
@@ -1222,9 +1248,10 @@ def _write_report(path: Path, details: dict[str, Any], decisions: list[dict[str,
         "",
         "## Required visual review",
         "",
-        "Inspect the cluster-QC metric figure, the cluster/QC UMAP, and every available "
-        "per-cluster correlation heatmap. Then call `review_cluster_qc`; this attestation "
-        "alone is not publication-ready.",
+        "Inspect the attached cluster-QC metric and UMAP overview. Use the decision table and "
+        "open a per-cluster correlation heatmap only where those views leave a specific cluster "
+        "ambiguous. Then call `review_cluster_qc`; this attestation alone is not "
+        "publication-ready.",
     ]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -1237,6 +1264,9 @@ def review(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     if evidence_id != evidence.get("evidence_id"):
         raise ValueError("evidence_id does not match the current cluster-QC evidence")
     reviewed = {str(value) for value in arguments.get("reviewed_artifacts", [])}
+    # Attached pixels were already presented with an immediate-read directive. Persist that
+    # runtime fact rather than forcing the model to copy every path back into the review call.
+    reviewed.update(str(value) for value in evidence.get("shown_visual_artifacts", []))
     required = {str(value) for value in evidence.get("required_visual_artifacts", [])}
     missing = sorted(required - reviewed)
     if missing:
@@ -1249,11 +1279,11 @@ def review(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     if not isinstance(supplied, dict):
         raise ValueError("cluster_reviews must be an object keyed by cluster")
     supplied_clusters = set(map(str, supplied))
-    if supplied_clusters != expected_clusters:
+    missing_clusters = expected_clusters - supplied_clusters
+    if missing_clusters:
         raise ValueError(
-            "cluster_reviews must cover exactly the clusters requiring review; "
-            f"missing={sorted(expected_clusters - supplied_clusters)}, "
-            f"extra={sorted(supplied_clusters - expected_clusters)}"
+            "cluster_reviews must cover every cluster requiring review; "
+            f"missing={sorted(missing_clusters)}"
         )
     normalized: dict[str, dict[str, str]] = {}
     unresolved: list[str] = []
@@ -1373,9 +1403,9 @@ def _cleanup_facts_patch(
             "fingerprint": fingerprint,
             "fingerprint_mode": "full",
             "format": {
-                "extension": "h5ad",
-                "suffixes": [".h5ad"],
-                "byte_signature": "hdf5",
+                "extension": "zarr",
+                "suffixes": [".zarr"],
+                "byte_signature": "zarr",
                 "extension_signature_consistent": True,
             },
             "lineage": {
@@ -1472,9 +1502,9 @@ def _apply_cleanup(
         evidence=evidence,
         ident=ident,
     )
-    output_relative = "cluster-qc-filtered-raw-counts.h5ad"
+    output_relative = "cluster-qc-filtered-raw-counts.zarr"
     output_path = context.staging_dir / output_relative
-    final_path = f"artifacts/capabilities/{context.execution_id}/{output_relative}"
+    final_path = f"{context.artifact_relative_path}/{output_relative}"
     filtered.uns = {
         "scagent_sdk": {
             "schema_version": 1,
@@ -1491,7 +1521,7 @@ def _apply_cleanup(
             "removal_fraction": evidence["cleanup"]["removal_fraction"],
         },
     }
-    filtered.write_h5ad(output_path, compression="gzip")
+    _write_matrix(filtered, output_path)
     stat = output_path.stat()
     fingerprint = _dataset_fingerprint(output_path)
     dataset_abs_path = str(
@@ -1524,7 +1554,7 @@ def _apply_cleanup(
         {
             "name": "cluster-qc-filtered-raw-counts",
             "relative_path": output_relative,
-            "media_type": "application/x-hdf5",
+            "media_type": "application/vnd.zarr",
         },
         {"name": "removed-cells", "relative_path": "removed-cells.csv", "media_type": "text/csv"},
     ]

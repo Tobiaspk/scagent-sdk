@@ -15,16 +15,6 @@ CLUSTER_QC_EVIDENCE_SCHEMA = 3
 # The gene-first batch-evidence schema. Legacy-shaped batch facts lack it and fail closed.
 BATCH_EVIDENCE_SCHEMA = 1
 
-# Authorization policy version applied when a batch decision was validated. Decisions validated
-# under an older policy no longer authorize integration.
-BATCH_DECISION_POLICY_VERSION = 1
-
-# Recommendations that permit integration without an explicit override warning.
-_INTEGRATION_SUPPORTING_RECOMMENDATIONS = frozenset(
-    {"integration_supported", "integration_optional_for_confirmed_replicates"}
-)
-
-
 @dataclass(frozen=True)
 class FloorFailure:
     floor: str
@@ -159,53 +149,33 @@ class FloorEvaluator:
                 return None
             return FloorFailure(
                 floor,
-                "Batch evidence is absent or stale for the current cells, counts, "
-                "representation, and clustering.",
+                "Batch evidence is absent or stale for the current cells and counts.",
                 "Run investigate_batch on the current clustering before deciding batch handling.",
             )
         if floor == "batch_decision":
             evidence = self._batch_evidence(facts)
             decision = self._batch_decision(facts)
+            evidence_current = (
+                isinstance(evidence, dict)
+                and evidence.get("schema_version") == BATCH_EVIDENCE_SCHEMA
+                and evidence.get("evidence_id")
+                and self._batch_identities_current(facts, evidence)
+            )
+            if evidence_current and evidence.get("status") == "not_applicable":
+                return None
             if (
                 isinstance(decision, dict)
-                and isinstance(evidence, dict)
+                and evidence_current
                 and decision.get("decision")
                 and decision.get("evidence_id") == evidence.get("evidence_id")
-                and self._batch_identities_current(facts, decision)
             ):
                 return None
             return FloorFailure(
                 floor,
                 "No explicit batch-handling decision is recorded against current batch evidence "
-                "for the active cells, counts, representation, and clustering.",
-                "Run investigate_batch, then decide_batch_handling with keep, integrate, "
-                "separate, request-guidance, or not-applicable.",
-            )
-        if floor == "integration_authorized":
-            evidence = self._batch_evidence(facts)
-            decision = self._batch_decision(facts)
-            if (
-                isinstance(decision, dict)
-                and isinstance(evidence, dict)
-                and decision.get("decision") == "integrate"
-                # The decision passed the capability's authorization policy, at the current version.
-                and decision.get("validated") is True
-                and decision.get("decision_policy_version") == BATCH_DECISION_POLICY_VERSION
-                # It was taken against exactly this evidence, for the current analysis identities.
-                and decision.get("evidence_id") == evidence.get("evidence_id")
-                and decision.get("integration_basis")
-                in ("documented_technical_batch", "user_authorized_comparable_replicates")
-                and self._batch_identities_current(facts, decision)
-                # When the evidence does not support integration, an explicit override is required.
-                and self._integration_override_satisfied(decision)
-            ):
-                return None
-            return FloorFailure(
-                floor,
-                "No current batch decision with an explicit integration basis authorizes "
-                "integration for the active cells, counts, representation, and clustering.",
-                "Investigate batch structure, then decide_batch_handling with "
-                "decision='integrate' and an integration_basis.",
+                "for the active cells and counts.",
+                "Run investigate_batch, ask the user once, then record keep_uncorrected, "
+                "integrate, or separate. Not-applicable evidence needs no second decision call.",
             )
         if floor == "current_annotation_evidence":
             clustering_id = self._clustering_id(facts)
@@ -280,18 +250,19 @@ class FloorEvaluator:
         return batch.get("decision") if isinstance(batch, dict) else None
 
     @staticmethod
-    def _integration_override_satisfied(decision: dict[str, Any]) -> bool:
-        """Integration against a non-supporting recommendation needs an explicit override."""
-        recommendation = decision.get("recommendation")
-        if recommendation in _INTEGRATION_SUPPORTING_RECOMMENDATIONS:
-            return True
-        override = decision.get("override_warning")
-        return isinstance(override, str) and bool(override.strip())
-
-    @staticmethod
     def _batch_identities_current(facts: dict[str, Any], node: dict[str, Any]) -> bool:
-        """A batch evidence/decision object is current only if the cells, counts, representation,
-        and clustering it was computed against still match the active analysis identities."""
+        """A batch evidence/decision object is current only if the CELLS and COUNTS it was
+        computed against still match the active analysis identities.
+
+        Currency is deliberately keyed to the cell set and count representation, NOT to the
+        downstream ``representation``/``clustering``. The batch judgement — whether these samples
+        should be integrated — is a property of the cells and their counts, established once on the
+        uncorrected pass. Integrating (which changes ``representation_id`` from X_pca to X_scVI) and
+        re-clustering (at the annotation resolution) are *consequences* of that decision and must
+        not invalidate it — otherwise integration would erase its own justification and force an
+        expensive re-run of the gene-first diagnostic. A genuine change to the cell set (a cleanup
+        removal) or to the counts still stales the evidence, as it should. Post-integration mixing
+        is verified separately by ``score_integration``, not by re-deciding batch handling."""
 
         analysis = facts.get("analysis")
         if not isinstance(analysis, dict):
@@ -299,8 +270,6 @@ class FloorEvaluator:
         for fact_key, id_key in (
             ("cell_set", "cell_set_id"),
             ("count_representation", "count_representation_id"),
-            ("representation", "representation_id"),
-            ("clustering", "clustering_id"),
         ):
             entry = analysis.get(fact_key)
             current = entry.get("id") if isinstance(entry, dict) else None

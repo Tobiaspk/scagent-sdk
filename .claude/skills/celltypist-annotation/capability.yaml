@@ -1,7 +1,7 @@
 schema_version: 1
 skill:
   id: celltypist-annotation
-  version: "0.3.0"
+  version: "0.4.0"
   description: Standalone per-cell CellTypist predictions and optional grouping summaries.
 readiness:
   entrypoint: scripts/readiness.py:probe
@@ -17,9 +17,10 @@ tools:
       properties:
         branch_from: {type: string, description: "Fork an alternative from a recorded version instead of continuing the current one. The active version does not change. Use this to compare alternatives - not to work around a superseded path."}
         path: {type: string, description: "Any H5AD with raw counts in the selected layer or X."}
-        model: {type: string, default: Immune_All_Low.pkl, description: Cached model filename or absolute model path.}
+        model: {type: string, minLength: 1, description: Explicitly selected cached model filename or absolute model path; no generic default is assumed.}
         counts_layer: {type: [string, "null"], default: counts, description: Raw-count layer name; use X or null for adata.X.}
         output_key: {type: string, default: celltypist_prediction}
+      required: [model]
       additionalProperties: false
     primary_matrix_input: path
     primary_matrix_output: celltypist-annotated-anndata

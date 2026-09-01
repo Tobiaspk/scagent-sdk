@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import fcntl
 import json
 import os
@@ -11,15 +12,41 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
+from scagent_sdk.runtime.compaction import (
+    CompactionConfig,
+    CompactionStats,
+    compact_entries,
+    estimate_tokens,
+    ratchet_calibration,
+)
+
 _SAFE_ID = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
 class ScientificSessionTranscriptStore:
-    """A Claude Agent SDK SessionStore scoped to one scientific session directory."""
+    """A Claude Agent SDK SessionStore scoped to one scientific session directory.
 
-    def __init__(self, scientific_session_dir: str | Path):
+    The transcript file on disk is append-only and complete. When a compaction config is
+    supplied, :meth:`load` returns a *compacted copy* of the transcript — the version the SDK
+    materializes for the CLI subprocess to replay — so a long session does not overflow the
+    model context window. Below the trim target the returned entries are byte-identical to the
+    stored ones, so short sessions and the SDK conformance suite are unaffected.
+    """
+
+    def __init__(
+        self,
+        scientific_session_dir: str | Path,
+        *,
+        compaction: CompactionConfig | None = None,
+    ):
         self.root = Path(scientific_session_dir).resolve() / "runtime" / "claude-agent-sdk"
         self.root.mkdir(parents=True, exist_ok=True)
+        self._compaction = compaction
+        self._calibration_path = self.root / "compaction.json"
+        # Estimate of the entries most recently returned by load(); calibrated against the real
+        # prompt-token count the runtime observes after the turn.
+        self._last_loaded_estimate: int = 0
+        self.last_compaction: CompactionStats | None = None
 
     def _safe_component(self, value: str, *, name: str) -> str:
         if not _SAFE_ID.fullmatch(value):
@@ -87,7 +114,55 @@ class ScientificSessionTranscriptStore:
     async def load(self, key: dict[str, Any]) -> list[dict[str, Any]] | None:
         path = self._path(key)
         entries = await asyncio.to_thread(self._read_entries, path)
-        return entries or None
+        if not entries:
+            return None
+        return await asyncio.to_thread(self._compact_for_replay, entries)
+
+    def _compact_for_replay(self, entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        config = self._compaction
+        if config is None or not config.active:
+            self._last_loaded_estimate = estimate_tokens(entries)
+            return entries
+        calibration = self._read_calibration()
+        compacted, stats = compact_entries(entries, config, calibration)
+        self._last_loaded_estimate = stats.tokens_after
+        if stats.triggered:
+            self.last_compaction = stats
+        return compacted
+
+    def _read_calibration(self) -> float:
+        try:
+            data = json.loads(self._calibration_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return 1.0
+        value = data.get("calibration") if isinstance(data, dict) else None
+        return float(value) if isinstance(value, (int, float)) and value > 0 else 1.0
+
+    def update_calibration(self, actual_prompt_tokens: int | None) -> float | None:
+        """Ratchet the estimator against the real prompt-token count of the last turn.
+
+        Returns the new factor when it changes, else ``None``. Best-effort and never fatal:
+        calibration only makes future estimates more conservative.
+        """
+
+        if not actual_prompt_tokens or self._last_loaded_estimate <= 0:
+            return None
+        current = self._read_calibration()
+        updated = ratchet_calibration(current, self._last_loaded_estimate, actual_prompt_tokens)
+        if abs(updated - current) < 1e-6:
+            return None
+        with contextlib.suppress(OSError):
+            self._calibration_path.write_text(
+                json.dumps({"calibration": updated}), encoding="utf-8"
+            )
+        return updated
+
+    def take_last_compaction(self) -> CompactionStats | None:
+        """Return and clear the most recent compaction stats, for the runtime to surface once."""
+
+        stats = self.last_compaction
+        self.last_compaction = None
+        return stats
 
     async def list_sessions(self, project_key: str) -> list[dict[str, Any]]:
         del project_key

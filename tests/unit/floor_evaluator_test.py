@@ -340,11 +340,7 @@ def _record_batch(
     evidence_id: str = "batch-evidence:e1",
     decision_evidence_id: str | None = None,
     status: str = "complete",
-    integration_basis: str | None = None,
     recommendation: str = "do_not_integrate_based_on_current_evidence",
-    validated: bool = True,
-    policy_version: int = 1,
-    override_warning: str | None = None,
 ) -> None:
     ids = _batch_ids(clustering_id)
     evidence = {
@@ -358,12 +354,7 @@ def _record_batch(
         {
             "decision": decision,
             "evidence_id": decision_evidence_id or evidence_id,
-            "integration_basis": integration_basis,
-            "recommendation": recommendation,
-            "validated": validated,
-            "decision_policy_version": policy_version,
-            "override_warning": override_warning,
-            **ids,
+            "rationale": "test choice",
         }
         if decision is not None
         else None
@@ -374,7 +365,11 @@ def _record_batch(
     )
 
 
-def test_current_batch_evidence_is_bound_and_stales_after_reclustering(tmp_path: Path) -> None:
+def test_current_batch_evidence_survives_reclustering_and_stales_on_cell_set(
+    tmp_path: Path,
+) -> None:
+    # The batch judgement is keyed to the cells/counts, not the downstream representation or
+    # clustering: re-clustering (or integrating) must NOT stale it, but a cell-set change must.
     session = AnalysisSession.create(tmp_path / "sessions", title="batch evidence floor")
     evaluator = FloorEvaluator()
     _seed_analysis_identities(session, clustering_id="cluster-a")
@@ -385,12 +380,26 @@ def test_current_batch_evidence_is_bound_and_stales_after_reclustering(tmp_path:
         "test.recluster",
         state_patch={"facts": {"analysis": {"clustering": {"id": "cluster-b"}}}},
     )
+    assert evaluator.evaluate(session.store.state, "current_batch_evidence") is None
+
+    session.store.record(
+        "test.integrate",
+        state_patch={"facts": {"analysis": {"representation": {"id": "rep-scvi"}}}},
+    )
+    assert evaluator.evaluate(session.store.state, "current_batch_evidence") is None
+
+    session.store.record(
+        "test.cleanup",
+        state_patch={"facts": {"analysis": {"cell_set": {"id": "cells-b"}}}},
+    )
     assert evaluator.evaluate(session.store.state, "current_batch_evidence") is not None
 
 
-def test_batch_decision_is_bound_to_identities_and_refires_after_reclustering(
+def test_batch_decision_survives_integration_and_reclustering(
     tmp_path: Path,
 ) -> None:
+    # A once-made integrate/keep decision must carry through integration (representation change)
+    # and the annotation re-clustering to finalization, without a forced re-decision.
     session = AnalysisSession.create(tmp_path / "sessions", title="batch decision floor")
     evaluator = FloorEvaluator()
     _seed_analysis_identities(session, clustering_id="cluster-a")
@@ -399,17 +408,12 @@ def test_batch_decision_is_bound_to_identities_and_refires_after_reclustering(
     assert evaluator.evaluate(session.store.state, "batch_decision") is None
 
     session.store.record(
+        "test.integrate",
+        state_patch={"facts": {"analysis": {"representation": {"id": "rep-scvi"}}}},
+    )
+    session.store.record(
         "test.recluster",
         state_patch={"facts": {"analysis": {"clustering": {"id": "cluster-b"}}}},
-    )
-    stale = evaluator.evaluate(session.store.state, "batch_decision")
-    assert stale is not None
-
-    _record_batch(
-        session,
-        decision="keep_uncorrected",
-        clustering_id="cluster-b",
-        evidence_id="batch-evidence:e2",
     )
     assert evaluator.evaluate(session.store.state, "batch_decision") is None
 
@@ -466,96 +470,16 @@ def test_batch_decision_stales_when_cell_set_changes(tmp_path: Path) -> None:
     assert evaluator.evaluate(session.store.state, "batch_decision") is not None
 
 
-def test_not_applicable_now_requires_current_identity_bound_evidence(tmp_path: Path) -> None:
+def test_not_applicable_current_evidence_needs_no_second_decision(tmp_path: Path) -> None:
     session = AnalysisSession.create(tmp_path / "sessions", title="batch not-applicable floor")
     evaluator = FloorEvaluator()
-    # The legacy identity-free not-applicable shortcut is gone.
+    # A bare identity-free claim still fails closed.
     session.store.record(
         "test.na_bare",
-        state_patch={"facts": {"batch": {"decision": {"decision": "not_applicable"}}}},
+        state_patch={"facts": {"batch": {"evidence": {"status": "not_applicable"}}}},
     )
     assert evaluator.evaluate(session.store.state, "batch_decision") is not None
 
     _seed_analysis_identities(session, clustering_id="cluster-a")
-    _record_batch(
-        session, decision="not_applicable", clustering_id="cluster-a", status="not_applicable"
-    )
+    _record_batch(session, decision=None, clustering_id="cluster-a", status="not_applicable")
     assert evaluator.evaluate(session.store.state, "batch_decision") is None
-
-
-def test_integration_authorized_requires_basis_and_current_evidence(tmp_path: Path) -> None:
-    session = AnalysisSession.create(tmp_path / "sessions", title="integration floor")
-    evaluator = FloorEvaluator()
-    _seed_analysis_identities(session, clustering_id="cluster-a")
-
-    _record_batch(session, decision="keep_uncorrected", clustering_id="cluster-a")
-    assert evaluator.evaluate(session.store.state, "integration_authorized") is not None
-
-    # integrate without an explicit basis does not authorize.
-    _record_batch(session, decision="integrate", clustering_id="cluster-a")
-    assert evaluator.evaluate(session.store.state, "integration_authorized") is not None
-
-    _record_batch(
-        session,
-        decision="integrate",
-        clustering_id="cluster-a",
-        integration_basis="documented_technical_batch",
-        recommendation="integration_supported",
-    )
-    assert evaluator.evaluate(session.store.state, "integration_authorized") is None
-
-    session.store.record(
-        "test.recluster",
-        state_patch={"facts": {"analysis": {"clustering": {"id": "cluster-b"}}}},
-    )
-    assert evaluator.evaluate(session.store.state, "integration_authorized") is not None
-
-
-def test_integration_requires_validated_decision_at_current_policy(tmp_path: Path) -> None:
-    session = AnalysisSession.create(tmp_path / "sessions", title="policy floor")
-    evaluator = FloorEvaluator()
-    _seed_analysis_identities(session, clustering_id="cluster-a")
-    kwargs = {
-        "decision": "integrate",
-        "clustering_id": "cluster-a",
-        "integration_basis": "documented_technical_batch",
-        "recommendation": "integration_supported",
-    }
-
-    # Unvalidated decision does not authorize.
-    _record_batch(session, validated=False, **kwargs)
-    assert evaluator.evaluate(session.store.state, "integration_authorized") is not None
-
-    # A decision validated under an older policy version does not authorize.
-    _record_batch(session, policy_version=0, **kwargs)
-    assert evaluator.evaluate(session.store.state, "integration_authorized") is not None
-
-    _record_batch(session, **kwargs)
-    assert evaluator.evaluate(session.store.state, "integration_authorized") is None
-
-
-def test_integration_against_recommendation_requires_override(tmp_path: Path) -> None:
-    session = AnalysisSession.create(tmp_path / "sessions", title="override floor")
-    evaluator = FloorEvaluator()
-    _seed_analysis_identities(session, clustering_id="cluster-a")
-    kwargs = {
-        "decision": "integrate",
-        "clustering_id": "cluster-a",
-        "integration_basis": "user_authorized_comparable_replicates",
-        "recommendation": "cannot_determine_technical_vs_biological",
-    }
-
-    # Recommendation does not support integration and no override is recorded.
-    _record_batch(session, **kwargs)
-    assert evaluator.evaluate(session.store.state, "integration_authorized") is not None
-
-    # A blank override is not an override.
-    _record_batch(session, override_warning="   ", **kwargs)
-    assert evaluator.evaluate(session.store.state, "integration_authorized") is not None
-
-    _record_batch(
-        session,
-        override_warning="User confirmed these are technical replicates of one condition.",
-        **kwargs,
-    )
-    assert evaluator.evaluate(session.store.state, "integration_authorized") is None

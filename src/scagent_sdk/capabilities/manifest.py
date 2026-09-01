@@ -40,11 +40,11 @@ def _nonempty(value: Any, *, name: str) -> str:
 
 
 def _with_executor_lineage_controls(
-    schema: dict[str, Any], *, primary_matrix_output: str | None
+    schema: dict[str, Any], *, primary_matrix_output: str | None, advances_lineage: bool
 ) -> dict[str, Any]:
     """Expose executor-owned controls without duplicating them across every manifest."""
 
-    if primary_matrix_output is None:
+    if primary_matrix_output is None or not advances_lineage:
         return schema
     updated = dict(schema)
     properties = dict(updated.get("properties") or {})
@@ -67,10 +67,14 @@ class CapabilityTool:
     # against it. Absent means the tool takes no lineage input -- an arbitrary file it merely
     # inspects is not the analysis matrix.
     primary_matrix_input: str | None = None
-    # Which declared artifact continues the lineage when this tool writes one. Named rather than
-    # detected by suffix, because CellBender emits three ``.h5`` matrices of which only the
-    # filtered one continues the analysis, and several tools write a matrix only conditionally.
+    # Which declared artifact is the tool's matrix output. Named rather than detected by suffix,
+    # because CellBender emits three ``.h5`` matrices of which only the filtered one continues the
+    # analysis, and some tools publish a format-only matrix without moving the head.
     primary_matrix_output: str | None = None
+    # Most matrix outputs become the next analysis version. A format-only publication still has to
+    # declare which artifact is the matrix, but setting this false records it as a derivative of
+    # the consumed version without moving the active head.
+    advances_lineage: bool = True
     # A lineage mutation the executor performs on this tool's behalf. Skills must never write
     # session state, so a tool that switches the active version declares the intent and validates
     # its target; the executor applies it. Currently only ``checkout``.
@@ -112,6 +116,10 @@ class CapabilityTool:
                 )
         if self.primary_matrix_output is not None:
             _nonempty(self.primary_matrix_output, name=f"tool {self.name}.primary_matrix_output")
+        if not self.advances_lineage and self.primary_matrix_output is None:
+            raise CapabilityManifestError(
+                f"tool {self.name}.advances_lineage=false requires primary_matrix_output"
+            )
         if self.lineage_operation is not None and self.lineage_operation not in _LINEAGE_OPERATIONS:
             raise CapabilityManifestError(
                 f"tool {self.name}.lineage_operation must be one of "
@@ -135,6 +143,7 @@ class CapabilityTool:
             "input_schema": self.input_schema,
             "primary_matrix_input": self.primary_matrix_input,
             "primary_matrix_output": self.primary_matrix_output,
+            "advances_lineage": self.advances_lineage,
             "lineage_operation": self.lineage_operation,
         }
 
@@ -147,9 +156,13 @@ class CapabilityTool:
                 if data.get("primary_matrix_output") is not None
                 else None
             )
+            advances_lineage = data.get("advances_lineage", True)
+            if not isinstance(advances_lineage, bool):
+                raise CapabilityManifestError("tool.advances_lineage must be true or false")
             input_schema = _with_executor_lineage_controls(
                 _mapping(data["input_schema"], name="tool.input_schema"),
                 primary_matrix_output=primary_matrix_output,
+                advances_lineage=advances_lineage,
             )
             return cls(
                 name=_nonempty(data["name"], name="tool.name"),
@@ -169,6 +182,7 @@ class CapabilityTool:
                     else None
                 ),
                 primary_matrix_output=primary_matrix_output,
+                advances_lineage=advances_lineage,
                 lineage_operation=(
                     _nonempty(data["lineage_operation"], name="tool.lineage_operation")
                     if data.get("lineage_operation") is not None
@@ -196,9 +210,7 @@ class CapabilityReadiness:
     def __post_init__(self) -> None:
         match = _ENTRYPOINT.fullmatch(self.entrypoint)
         if match is None or Path(match.group("path")).is_absolute():
-            raise CapabilityManifestError(
-                "readiness.entrypoint must be relative/path.py:function"
-            )
+            raise CapabilityManifestError("readiness.entrypoint must be relative/path.py:function")
         if self.environment is not None:
             _nonempty(self.environment, name="readiness.environment")
 

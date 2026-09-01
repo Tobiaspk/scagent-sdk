@@ -18,46 +18,66 @@ from an already processed artifact, and the observed data may require replanning
    identifiers before QC when symbols are available.
 2. Calculate cell QC with `counts_layer="auto"`. Inspect every returned standard figure, evaluate
    doublets when raw counts permit it, and call `review_single_cell_qc` with a concrete keep/filter
-   rationale. If cells or genes are removed, recalculate and review QC on the retained artifact.
+   rationale. **Cell removal is normally deferred to step 4**: early QC flags are instrumentation,
+   and a per-cell mitochondrial or complexity cut cannot separate a dying population from a real
+   high-mitochondrial cell type — only cluster context can. The expected decision here is therefore
+   `keep_all`, saying what the tail looks like and that it will be adjudicated at cluster QC.
+   Filter before clustering only for unambiguous non-cells (empty droplets, near-zero complexity
+   debris), for a user- or source-specified protocol, or when debris would dominate the embedding —
+   and then review *before* filtering, state the threshold and the exact count removed, and
+   recalculate and review QC on the retained artifact. Keep doublet-flagged cells in the object;
+   their distribution across clusters is the evidence. Gene-level low-detection filtering is a
+   separate, ordinary preprocessing step and is not deferred.
 3. Normalize, select HVGs, compute PCA, inspect the PCA variance figure, build neighbors, compute
    UMAP, and call `plot_qc_embedding`. Explain where quality signals localize; distributions alone
    do not show whether a signal is a coherent population.
-4. Cluster **iteratively, not in parallel**. Unless the user specifies another ladder, descend
-   Leiden **2.0 → 1.5 → 1.0**, one round at a time, each round running on the cells the previous
-   round left behind. A later resolution is not a competing candidate on the same cells; it is the
-   next phase on cleaner cells. Per round:
-   1. Cluster at that round's resolution into a distinct key such as `leiden_res_2_0`.
-   2. Run `evaluate_cluster_qc` in its default report-only mode, inspect its per-cluster metric
-      boxplots, cluster/QC UMAP, per-cluster highlight grid, and every covariance heatmap, then
-      call `review_cluster_qc`.
-   3. If the review confirms removal, apply it by re-running `evaluate_cluster_qc` with
-      `auto_remove_convergent=true`. That issues fresh cell-set and count identities and clears the
-      representation, clustering, cell-QC, and doublet evidence.
-   4. Re-prepare the retained cells before the next round: normalize, **re-select HVGs**, PCA,
-      neighbors, UMAP, and re-run cell QC with its review. Removing cells changes the variance
-      landscape, so HVG selection must be recomputed rather than carried across a cleanup.
-   5. Step down to the next resolution and repeat.
+4. Cluster first at exploratory Leiden **2.0** (`resolution` has no default and must be stated) to expose small low-quality populations while they are still separable. Run
+   `evaluate_cluster_qc` in report-only mode, inspect its compact evidence and the attached standard
+   figures, open a covariance heatmap only for a genuinely ambiguous cluster, and call
+   `review_cluster_qc`. If the review confirms removal, apply it, then re-normalize, re-select HVGs,
+   recompute PCA/neighbors/UMAP, and repeat exploratory QC on the retained cells. Removing cells
+   changes the variance landscape; do not reuse the old HVG mask or embedding.
 
-   The high resolution exists to expose small low-quality populations for removal; the lower ones
-   are the working and annotation granularities on progressively cleaner cells. End the cleanup
-   loop when a round flags nothing that requires removal, but still descend to the annotation
-   resolution. Do not carry an unresolved remove/merge/split/recluster disposition into annotation.
-   The ladder is an overridable default, not a hardcoded requirement; change it when cluster sizes,
-   stability, or biology justify it.
-5. Annotate the clustering at the bottom of the ladder—**1.0 by default**. Deviate only for a
+   The comprehensive run works down the **2.0 → 1.5 → 1.0 ladder, and every clustering it creates
+   gets its own cluster-QC round** — evaluate, inspect the figures, review, and check at each rung
+   whether a population now needs to be removed. A clean 2.0 pass ends the *pre-batch cleanup
+   loop* (no more removals to chase before the batch decision), but it does not skip the later
+   rungs' QC: 1.5 is the round for the cells left after a confirmed removal **and for the first
+   re-clustering on an integrated embedding** (step 5), and the 1.0 annotation clustering gets a
+   full QC round before any DEG or annotation work (step 6). Small low-quality or doublet
+   populations that hid inside healthy neighbours at one granularity can surface at another, and
+   integration reshuffles neighborhoods — so each rung is re-adjudicated on its own evidence, not
+   waved through because the previous rung was clean. Do not carry an unresolved
+   remove/merge/split/recluster disposition
+   into annotation.
+5. With a clean exploratory representation, investigate batch structure when meaningful batch
+   metadata exists. Use the bounded profile-nomination investigation, present its compact evidence
+   to the user, and stop for an explicit handling choice before recording a decision. Record
+   `not_applicable` when no defensible batch unit exists. Investigate batch **once**, on the
+   uncorrected pass — it is the expensive gene-first diagnostic and answers only *whether* to
+   integrate. If integration is chosen, rebuild the neighbors/UMAP from the integrated
+   representation, then verify the correction with **`score_integration`** (X_scVI mixing vs the
+   X_pca baseline) — do **not** re-run `investigate_batch` to check integration; the once-made
+   batch decision carries through integration and re-clustering to finalization. A recurring
+   sample-linked program that persists in the gene evidence after scVI is expected donor biology,
+   not proof the integration failed; judge success from mixing improvement, not from gene programs.
+   After integration, the first re-clustering on the integrated embedding is at **1.5** with its
+   own full cluster-QC round (evaluate, inspect, review): the corrected representation reshuffles
+   neighborhoods, so populations are re-adjudicated there before stepping down to annotation.
+6. Create the annotation clustering at **1.0 by default**, coming down from the exploratory resolution rather than back up to a finer one. Deviate only for a
    stated scientific reason, such as DEG identity, covariance coherence, or separation showing
    genuine over- or under-splitting; never merely because a finer clustering was run more recently.
-   Compute DEGs only once you are on the clustering you intend to annotate, since a DEG pass at a
-   QC resolution is discarded when you later step down. Make that clustering current, then
-   investigate batch structure when meaningful batch metadata exists and record an explicit
-   decision. Record `not_applicable` when no defensible batch unit exists.
-6. For annotation, use SCimilarity early when it helps establish broad tissue/context, inspect the
+   Run `evaluate_cluster_qc` and `review_cluster_qc` on this annotation clustering too — it is the
+   clustering the labels will bind to, and its QC round is what certifies it — then
+   compute DEGs only once you are on the clustering you intend to annotate, since a DEG pass at a
+   QC resolution is discarded when you later step down. Make that clustering current.
+7. For annotation, use SCimilarity early when it helps establish broad tissue/context, inspect the
    complete readiness inventory of cached CellTypist models, and choose the closest organism/tissue
    model rather than a generic immune default. When both are suitable, run and summarize both and
    visualize their agreement. Generate cluster DEGs and marker programs; **DEGs are the primary
    decision basis**, while references and curated marker resources such as Cytopus corroborate or
    challenge the call. Query the reference atlas or literature for genuinely ambiguous clusters.
-7. Call `review_annotation_evidence`, leaving ambiguous clusters unresolved until the evidence is
+8. Call `review_annotation_evidence`, leaving ambiguous clusters unresolved until the evidence is
    adequate. Finalize only then. The final report must reconstruct the full committed workflow,
    parameters, QC decisions, cluster reviews, batch decision, annotation disagreements, caveats,
    and deliverables.

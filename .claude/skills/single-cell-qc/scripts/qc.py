@@ -19,6 +19,23 @@ _SYMBOL_COLUMNS = (
 )
 
 
+def _read_matrix(path):
+    """Read an AnnData artifact, tolerating both .h5ad files and .zarr stores (ADR 0011)."""
+    import anndata as ad
+
+    return ad.read_zarr(path) if str(path).endswith(".zarr") else ad.read_h5ad(path)
+
+
+def _write_matrix(adata, path):
+    """Write an AnnData artifact: a .zarr store (blosc) or a gzipped .h5ad file (ADR 0011)."""
+    import anndata as ad
+
+    if str(path).endswith(".zarr"):
+        ad.settings.zarr_write_format = 2  # v2 until the v3 sharding/dedup design lands
+        adata.write_zarr(path)
+    else:
+        adata.write_h5ad(path, compression="gzip")
+
 def _identity(kind: str, value: Any) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()
     return f"{kind}:sha256:{hashlib.sha256(encoded).hexdigest()}"
@@ -400,7 +417,7 @@ def _base_metadata(adata: Any) -> dict[str, Any]:
 def _write_qc_artifacts(
     adata: Any, context: Any, *, output_name: str, report: dict[str, Any]
 ) -> list[dict[str, str]]:
-    adata.write_h5ad(context.staging_dir / output_name, compression="gzip")
+    _write_matrix(adata, context.staging_dir / output_name)
     adata.obs[
         [
             column
@@ -424,7 +441,7 @@ def _write_qc_artifacts(
         {
             "name": "qc-anndata",
             "relative_path": output_name,
-            "media_type": "application/x-hdf5",
+            "media_type": "application/vnd.zarr",
         },
         {
             "name": "cell-qc-metrics",
@@ -440,10 +457,9 @@ def _write_qc_artifacts(
 
 
 def calculate_qc(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
-    import scanpy as sc
 
     path = Path(str(arguments["path"])).expanduser().resolve()
-    if not path.is_file():
+    if not path.exists():
         raise FileNotFoundError(path)
     layer_arg = arguments.get("counts_layer", "auto")
     layer = str(layer_arg) if layer_arg is not None else None
@@ -456,7 +472,7 @@ def calculate_qc(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
         "max_genes": int(max_arg) if max_arg is not None else None,
         "max_pct_mito": float(mito_arg) if mito_arg is not None else None,
     }
-    source = sc.read_h5ad(path)
+    source = _read_matrix(path)
     layer = _resolve_layer(source, layer)
     adata, flags = _add_metrics(source, layer=layer, organism=organism, **thresholds)
     metadata = _base_metadata(adata)
@@ -470,8 +486,8 @@ def calculate_qc(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
         },
     )
     adata.uns["scagent_sdk"] = metadata
-    output_name = "qc-assessed.h5ad"
-    final_path = f"artifacts/capabilities/{context.execution_id}/{output_name}"
+    output_name = "qc-assessed.zarr"
+    final_path = f"{context.artifact_relative_path}/{output_name}"
     report = {
         "operation": "calculate_only",
         "organism": organism,
@@ -503,7 +519,7 @@ def calculate_qc(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     artifacts.extend(figures)
     provenance = dict(adata.uns.get("scagent_sdk", {}))
     required_visual_artifacts = [
-        f"artifacts/capabilities/{context.execution_id}/{item['relative_path']}"
+        f"{context.artifact_relative_path}/{item['relative_path']}"
         for item in figures
     ]
     return {
@@ -523,6 +539,7 @@ def calculate_qc(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
                 "count_representation_id": provenance.get("count_representation_id"),
                 "review_status": "pending",
                 "required_visual_artifacts": required_visual_artifacts,
+                "shown_visual_artifacts": required_visual_artifacts,
             }
         },
         "artifacts": artifacts,
@@ -542,6 +559,7 @@ def review_qc(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     if not rationale:
         raise ValueError("rationale must not be empty")
     reviewed = {str(value) for value in arguments.get("reviewed_artifacts", [])}
+    reviewed.update(str(value) for value in evidence.get("shown_visual_artifacts", []))
     required = {str(value) for value in evidence.get("required_visual_artifacts", [])}
     missing = sorted(required - reviewed)
     if missing:
@@ -573,25 +591,32 @@ def review_qc(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
 
 
 def filter_cells(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
-    import scanpy as sc
 
     if arguments.get("confirm_filtering") is not True:
         raise ValueError("confirm_filtering must be true before changing the cell set")
     path = Path(str(arguments["path"])).expanduser().resolve()
-    if not path.is_file():
+    if not path.exists():
         raise FileNotFoundError(path)
     layer_arg = arguments.get("counts_layer", "auto")
     layer = str(layer_arg) if layer_arg is not None else None
     organism = str(arguments.get("organism", "human"))
-    min_arg = arguments.get("min_genes", 200)
+    # Deliberately no threshold defaults on the mutating tool: the flag thresholds on
+    # calculate_single_cell_qc are instrumentation, and inheriting them here would let a
+    # bare call delete the mitochondrial tail as a side effect of a default.
+    min_arg = arguments.get("min_genes")
     max_arg = arguments.get("max_genes")
-    mito_arg = arguments.get("max_pct_mito", 20)
+    mito_arg = arguments.get("max_pct_mito")
+    if min_arg is None and max_arg is None and mito_arg is None:
+        raise ValueError(
+            "no threshold requested: state min_genes, max_genes, and/or max_pct_mito "
+            "explicitly when removing cells (this tool has no default thresholds)"
+        )
     thresholds = {
         "min_genes": int(min_arg) if min_arg is not None else None,
         "max_genes": int(max_arg) if max_arg is not None else None,
         "max_pct_mito": float(mito_arg) if mito_arg is not None else None,
     }
-    source = sc.read_h5ad(path)
+    source = _read_matrix(path)
     layer = _resolve_layer(source, layer)
     assessed, flags = _add_metrics(source, layer=layer, organism=organism, **thresholds)
     before = int(assessed.n_obs)
@@ -631,7 +656,7 @@ def filter_cells(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     for key in ("representation_id", "clustering_id", "qc_assessment_id"):
         metadata.pop(key, None)
     filtered.uns["scagent_sdk"] = metadata
-    output_name = "cells-filtered.h5ad"
+    output_name = "cells-filtered.zarr"
     report = {
         "operation": "filter_cells",
         "before_cells": before,
@@ -678,17 +703,16 @@ def filter_cells(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
 
 def filter_genes(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     import numpy as np
-    import scanpy as sc
 
     if arguments.get("confirm_filtering") is not True:
         raise ValueError("confirm_filtering must be true before changing the feature set")
     path = Path(str(arguments["path"])).expanduser().resolve()
-    if not path.is_file():
+    if not path.exists():
         raise FileNotFoundError(path)
     layer_arg = arguments.get("counts_layer", "auto")
     layer = str(layer_arg) if layer_arg is not None else None
     min_cells = int(arguments.get("min_cells", 3))
-    adata = sc.read_h5ad(path)
+    adata = _read_matrix(path)
     layer = _resolve_layer(adata, layer)
     counts = _matrix(adata, layer)
     detected = np.asarray((counts > 0).sum(axis=0)).ravel()
@@ -738,8 +762,8 @@ def filter_genes(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     ):
         metadata.pop(key, None)
     filtered.uns["scagent_sdk"] = metadata
-    output_name = "genes-filtered.h5ad"
-    filtered.write_h5ad(context.staging_dir / output_name, compression="gzip")
+    output_name = "genes-filtered.zarr"
+    _write_matrix(filtered, context.staging_dir / output_name)
     report = {
         "operation": "filter_genes",
         "before_genes": before,
@@ -783,7 +807,7 @@ def filter_genes(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
             {
                 "name": "gene-filtered-anndata",
                 "relative_path": output_name,
-                "media_type": "application/x-hdf5",
+                "media_type": "application/vnd.zarr",
             },
             {
                 "name": "gene-filter-summary",

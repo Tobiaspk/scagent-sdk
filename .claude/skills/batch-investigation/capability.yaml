@@ -1,11 +1,11 @@
 schema_version: 1
 skill:
   id: batch-investigation
-  version: "0.5.0"
-  description: Gene-first batch evidence and a separate identity-bound handling decision.
+  version: "0.9.0"
+  description: Gene-first batch evidence followed by one concise, evidence-bound handling choice.
 tools:
   - name: investigate_batch
-    description: Produce gene-first batch evidence — sample-enriched regions, within-sample identity DEGs, cross-sample population matches, direct matched comparisons, recurring programs, and design confounding — with a two-axis verdict and non-binding recommendation. Records no decision.
+    description: Produce gene-first batch evidence, a concise interpretation, and a non-binding recommendation. Records no handling decision.
     entrypoint: scripts/investigate.py:run_evidence
     environment: gpu-singlecell
     activity_label: Investigating batch evidence
@@ -19,65 +19,24 @@ tools:
           type: [string, "null"]
           description: Observation column for a meaningful batch unit; null records not_applicable.
         cluster_key: {type: string, default: leiden}
-        condition_keys:
-          type: array
-          uniqueItems: true
-          items: {type: string, minLength: 1}
-          default: []
-          description: Design/condition columns to cross-tab against the batch key for confounding.
-        technical_batch_documented:
-          type: boolean
-          default: false
-          description: Only true when metadata/documentation establishes a technical batch.
-        technical_batch_basis: {type: [string, "null"], default: null}
-        min_cells_per_region: {type: integer, minimum: 10, default: 30}
-        min_enrichment: {type: number, minimum: 1, default: 2.0}
-        n_identity_genes: {type: integer, minimum: 5, maximum: 100, default: 25}
-        max_regions: {type: integer, minimum: 1, maximum: 200, default: 40}
-        max_candidate_pairs:
-          type: integer
-          minimum: 1
-          maximum: 500
-          default: 60
-          description: Hard cap on matched region pairs that receive a direct DE comparison.
-        min_shared_identity_genes:
-          type: integer
-          minimum: 1
-          default: 3
-          description: Minimum shared DISCRIMINATING genes for a supported cross-sample match.
-        min_match_jaccard:
-          type: number
-          minimum: 0
-          maximum: 1
-          default: 0.15
-          description: Minimum discriminating-gene Jaccard for a supported match.
-        min_fraction_difference: {type: number, minimum: 0, maximum: 1, default: 0.1}
-        min_logfoldchange: {type: number, default: 0.5}
-        max_adjusted_pvalue: {type: number, exclusiveMinimum: 0, maximum: 1, default: 0.05}
-        n_neighbors_for_mixing: {type: integer, minimum: 2, maximum: 200, default: 30}
-        max_cells_for_mixing: {type: integer, minimum: 100, default: 20000}
-        random_seed: {type: integer, default: 0}
       required: [batch_key]
       additionalProperties: false
     primary_matrix_input: path
   - name: decide_batch_handling
-    description: Record an explicit batch-handling decision against current batch evidence. Non-integration decisions are always allowed; integration requires an explicit basis and never proceeds silently against the evidence.
+    description: Record the user's concise handling choice against the current batch evidence.
     entrypoint: scripts/investigate.py:run_decision
     environment: gpu-singlecell
     activity_label: Recording batch decision
-    floors: [current_batch_evidence]
     input_schema:
       type: object
       properties:
         evidence_id: {type: string, minLength: 1}
         decision:
           type: string
-          enum: [keep_uncorrected, integrate, separate, request_guidance, not_applicable]
-        rationale: {type: string, minLength: 1}
-        integration_basis:
-          type: [string, "null"]
-          enum: [documented_technical_batch, user_authorized_comparable_replicates, null]
-          default: null
-        override_warning: {type: [string, "null"], default: null}
+          enum: [keep_uncorrected, integrate, separate]
+        rationale:
+          type: string
+          minLength: 1
+          description: One or two grounded sentences explaining the choice; do not restate the report.
       required: [evidence_id, decision, rationale]
       additionalProperties: false

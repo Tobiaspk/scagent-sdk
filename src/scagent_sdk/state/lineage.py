@@ -56,6 +56,7 @@ FACT_ROOT_SCOPES: dict[str, Scope] = {
     "cluster_qc": "node",
     "doublets": "node",
     "finalization": "node",
+    "group_gene_ranking": "node",
     # Session-scoped: properties of the input, or caches keyed independently of the active branch.
     "custom_analysis": "session",
     "dataset": "session",
@@ -383,7 +384,7 @@ def _historical_node_for_path(
     Live dispatch deliberately accepts only a canonical path match. Historical events, however,
     recorded absolute paths rooted at the session's location at execution time. After a backup is
     restored elsewhere those paths are stale even though the executor-owned
-    ``artifacts/capabilities/<execution_id>/...`` identity is unchanged.
+    ``artifacts/capabilities/<action>--<execution_id>/...`` identity is unchanged.
 
     Try the strict live rule first, then match the complete executor-owned artifact tail. This
     fallback is migration-only: it cannot weaken live input validation, and requiring the known
@@ -405,8 +406,14 @@ def _historical_node_for_path(
         if not isinstance(candidate, str) or not candidate:
             continue
         relative = candidate.replace("\\", "/").lstrip("./").rstrip("/")
-        owned_prefix = f"artifacts/capabilities/{execution_id}/"
-        if not relative.startswith(owned_prefix):
+        parts = relative.split("/")
+        # The owned tail is ``artifacts/capabilities/<dir>/<file...>``. The directory is named
+        # ``<action>--<execution_id>`` (or the bare ID, pre-descriptive-naming), so match on the ID
+        # preserved as its suffix rather than reconstructing a fixed prefix.
+        if len(parts) < 4 or parts[0] != "artifacts" or parts[1] != "capabilities":
+            continue
+        directory = parts[2]
+        if directory != str(execution_id) and not directory.endswith(f"--{execution_id}"):
             continue
         if normalized == relative or normalized.endswith("/" + relative):
             matches.append(str(execution_id))
@@ -569,6 +576,9 @@ def rebuild_forest(
         arguments = arguments if isinstance(arguments, Mapping) else {}
 
         dispatch = payload.get("lineage")
+        advances_lineage = not (
+            isinstance(dispatch, Mapping) and dispatch.get("advances_lineage", True) is False
+        )
         declared_name = dispatch.get("matrix_output") if isinstance(dispatch, Mapping) else None
         if not isinstance(declared_name, str) or not declared_name:
             declared_name = LEGACY_PRIMARY_MATRIX_OUTPUTS_V1.get(
@@ -583,9 +593,9 @@ def rebuild_forest(
             str(item.get("relative_path"))
             for item in files
             if isinstance(item, Mapping)
-            and str(item.get("relative_path", "")).lower().endswith(".h5ad")
+            and str(item.get("relative_path", "")).lower().endswith((".h5ad", ".zarr"))
         ]
-        matrices = declared or fallback
+        matrices = (declared or fallback) if advances_lineage else []
         if not declared and len(fallback) > 1:
             warnings.append(
                 f"{execution_id}: found {len(fallback)} possible matrix artifacts without a "

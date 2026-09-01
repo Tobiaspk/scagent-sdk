@@ -76,7 +76,8 @@ def test_assembler_denies_floor_bound_tool_until_state_satisfies_floor(tmp_path:
     matcher = next(
         item
         for item in extensions.hooks["PreToolUse"]
-        if item.matcher == "mcp__finalize_analysis__finalize_analysis"
+        if item.matcher
+        == "mcp__cellbender_background_removal__remove_ambient_background"
     )
     result = asyncio.run(matcher.hooks[0]({}, "use-floor", {}))
 

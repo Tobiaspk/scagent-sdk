@@ -16,6 +16,7 @@ import pytest
 
 from scagent_sdk.capabilities.executor import CapabilityExecutor
 from scagent_sdk.capabilities.registry import CapabilityRegistry
+from scagent_sdk.capabilities.results import capability_artifact_directory_name
 from scagent_sdk.errors import CapabilityExecutionError
 from scagent_sdk.session import AnalysisSession
 from scagent_sdk.state.lineage import (
@@ -61,6 +62,16 @@ tools:
         path: {type: string}
         facts: {type: object}
     primary_matrix_input: path
+  - name: export_matrix
+    description: publish a format-only matrix artifact
+    entrypoint: scripts/run.py:export_matrix
+    input_schema:
+      type: object
+      properties:
+        path: {type: string}
+    primary_matrix_input: path
+    primary_matrix_output: portable-matrix
+    advances_lineage: false
   - name: review_facts
     description: write node-scoped evidence from facts only
     entrypoint: scripts/run.py:write_evidence
@@ -110,6 +121,22 @@ def write_evidence(arguments, context):
             }
         ],
     }
+
+
+def export_matrix(arguments, context):
+    (context.staging_dir / "portable.h5ad").write_bytes(b"H5AD")
+    return {
+        "summary": "exported a matrix",
+        "details": {},
+        "facts_patch": {},
+        "artifacts": [
+            {
+                "name": "portable-matrix",
+                "relative_path": "portable.h5ad",
+                "media_type": "application/x-h5ad",
+            }
+        ],
+    }
 '''.lstrip(),
         encoding="utf-8",
     )
@@ -138,13 +165,17 @@ class _Harness:
         return execution_id
 
     def matrix_path(self, execution_id: str) -> str:
-        return str(
-            self.session.directory
-            / "artifacts"
-            / "capabilities"
-            / execution_id
-            / "matrix.h5ad"
+        # The committed directory is named ``<action>--<id>``. Prefer the recorded path; before a
+        # commit exists (recovery-ordering tests stage without committing), compute the same name
+        # the executor would -- matrix_path only ever names ``make_matrix`` outputs here.
+        record = self.session.store.state.artifacts.get(execution_id)
+        directory = (
+            record["path"]
+            if isinstance(record, dict) and record.get("path")
+            else "artifacts/capabilities/"
+            + capability_artifact_directory_name("make_matrix", execution_id)
         )
+        return str(self.session.directory / directory / "matrix.h5ad")
 
     @property
     def lineage(self) -> dict[str, Any]:
@@ -166,9 +197,10 @@ def test_first_matrix_creates_a_root_node_and_becomes_the_head(tmp_path: Path) -
     assert active_head(harness.lineage) == first
     # Optional fields are omitted rather than stored as null: a merge patch deletes null keys.
     assert node.get("parent_execution_id") is None
-    assert node["head_path"] == f"artifacts/capabilities/{first}/matrix.h5ad"
+    first_dir = capability_artifact_directory_name("make_matrix", first)
+    assert node["head_path"] == f"artifacts/capabilities/{first_dir}/matrix.h5ad"
     assert node["identity_signature"].startswith("identity:v1:sha256:")
-    prepared = f"artifacts/capabilities/{first}/matrix.h5ad"
+    prepared = f"artifacts/capabilities/{first_dir}/matrix.h5ad"
     assert harness.facts["analysis"]["dataset_revision"]["prepared_path"] == prepared
     assert resolve_node_facts(harness.lineage, first, merge=apply_merge_patch)["analysis"][
         "dataset_revision"
@@ -183,6 +215,42 @@ def test_parent_is_the_artifact_actually_consumed(tmp_path: Path) -> None:
     assert harness.lineage["nodes"][second]["parent_execution_id"] == first
     assert harness.lineage["nodes"][second]["resolved_input_execution_id"] == first
     assert ancestry(harness.lineage, second) == [second, first]
+
+
+def test_format_only_matrix_export_records_parent_without_advancing_head(
+    tmp_path: Path,
+) -> None:
+    harness = _Harness(tmp_path, "format-only-export")
+    first = harness.run("make_matrix")
+    second = harness.run("make_matrix")
+
+    exported = harness.run("export_matrix", path=harness.matrix_path(first))
+
+    assert active_head(harness.lineage) == second
+    assert exported not in harness.lineage["nodes"]
+    artifact = harness.session.store.state.artifacts[exported]
+    assert artifact["lineage"]["resolved_input_execution_id"] == first
+    assert artifact["lineage"]["input_relation"] == "ancestor"
+    assert artifact["lineage"]["matrix_output"] == "portable.h5ad"
+    assert artifact["lineage"]["advances_lineage"] is False
+    assert (harness.session.directory / artifact["path"] / "portable.h5ad").is_file()
+    assert harness.facts["analysis"]["dataset_revision"]["prepared_path"].endswith(
+        f"make-matrix--{second}/matrix.h5ad"
+    )
+
+
+def test_committing_a_child_hard_links_unchanged_files_to_its_parent(tmp_path: Path) -> None:
+    # make_matrix writes identical bytes, so a child that descends from a parent should have its
+    # matrix.h5ad hard-linked onto the parent's inode at commit (ADR 0011 P1 dedup).
+    harness = _Harness(tmp_path, "dedup-chain")
+    first = harness.run("make_matrix")
+    second = harness.run("make_matrix", path=harness.matrix_path(first))
+
+    parent_matrix = Path(harness.matrix_path(first))
+    child_matrix = Path(harness.matrix_path(second))
+    assert child_matrix.read_bytes() == b"H5AD"  # content intact
+    assert child_matrix.stat().st_ino == parent_matrix.stat().st_ino  # shared inode
+    assert parent_matrix.stat().st_nlink >= 2
 
 
 def test_a_sweep_from_one_parent_now_needs_explicit_branch_intent(tmp_path: Path) -> None:

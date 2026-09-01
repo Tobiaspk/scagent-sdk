@@ -494,7 +494,10 @@ def build_analysis_notebook(
 
         figures = _figure_files(item)
         embed_plan, link_plan = _plan_figures(figures, remaining)
-        root = session_dir / "artifacts" / "capabilities" / str(item.get("execution_id", ""))
+        # The record's committed path is <action>--<execution_id>; fall back to the bare id only for
+        # legacy records written before descriptive directory naming.
+        artifact_dir = item.get("path") or f"artifacts/capabilities/{item.get('execution_id', '')}"
+        root = session_dir / artifact_dir
         embedded: list[tuple[str, dict[str, Any], str]] = []
         for raw in embed_plan:
             relative = str(raw["relative_path"])
@@ -505,10 +508,7 @@ def build_analysis_notebook(
                 continue
             embedded.append((name, attachment, str(raw.get("name", Path(relative).stem))))
             remaining -= int(raw.get("size_bytes") or 0)
-        links = [
-            f"../artifacts/capabilities/{item.get('execution_id', '')}/{raw['relative_path']}"
-            for raw in link_plan
-        ]
+        links = [f"../{artifact_dir}/{raw['relative_path']}" for raw in link_plan]
         cells.extend(
             _render_step(
                 number=number,

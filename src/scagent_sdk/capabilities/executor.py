@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import filecmp
+import hashlib
 import inspect
 import json
 import os
 import re
 import sys
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import suppress
 from copy import deepcopy
+from functools import partial
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -25,6 +28,7 @@ from scagent_sdk.capabilities.results import (
     MODEL_MEDIA_TOTAL_BYTES,
     CapabilityContext,
     CapabilityResult,
+    capability_artifact_directory_name,
 )
 from scagent_sdk.contracts.state import SessionState
 from scagent_sdk.errors import CapabilityExecutionError, CapabilityInterrupted
@@ -57,7 +61,9 @@ _EXCEPTION_LINE = re.compile(r"^[A-Za-z_][\w.]*(?:Error|Exception|Warning):\s+(.
 # execution has ever produced more than one ``.h5ad`` (0 of 61). Both become declared fields --
 # ``primary_matrix_input``/``primary_matrix_output`` -- in the spec's D5; until then a second
 # matrix output raises rather than being guessed at.
-_MATRIX_SUFFIX = ".h5ad"
+# A matrix artifact is an .h5ad file or a .zarr store; the stray-output check must catch either, or
+# an undeclared matrix silently detaches from lineage.
+_MATRIX_SUFFIX = (".h5ad", ".zarr")
 # Executor-owned control argument. Declared in the schemas of tools that can transform the dataset
 # so the model may pass it, but removed before dispatch: branching is a lineage concern and no skill
 # should have to know the forest exists.
@@ -71,6 +77,69 @@ _PATH_ARGUMENT_SUFFIXES = ("_dir", "_directory", "_file", "_path")
 
 class _AlreadyCommitted(Exception):
     """Internal signal for a duplicate commit observed only after the store reloads state."""
+
+
+# Longest edge, in pixels, of an image sent to the model. The model's own image pipeline resamples
+# to roughly this edge, so a larger preview costs transport without adding legibility (mirrors the
+# inspect-media skill's DEFAULT_IMAGE_SIDE).
+_MODEL_IMAGE_EDGE = 1568
+# Progressively smaller edges tried when a figure is still over budget at the default edge.
+_MODEL_IMAGE_FALLBACK_EDGES = (1280, 1024, 768, 512)
+
+
+def _bounded_model_image(data: bytes, media_type: str, limit: int) -> tuple[bytes, str]:
+    """Return image bytes that fit ``limit``, downscaling and re-encoding only if needed.
+
+    A dense scientific figure -- a multi-panel UMAP of tens of thousands of cells -- can exceed the
+    per-image transport budget as a full-resolution PNG. Discarding the whole capability result over
+    that (the prior behavior) threw away real science for a presentation-layer concern; the model's
+    own pipeline would have resampled the image anyway. Instead we shrink the pixels sent to the
+    model to fit, exactly as the ``inspect-media`` skill normalizes previews. The committed artifact
+    on disk is untouched and stays full resolution; only the attached copy is bounded.
+
+    PNG is kept when it already fits or is smaller than the JPEG; otherwise the figure is flattened
+    to JPEG, which is far smaller for antialiased scatter/heatmap content. If even the smallest edge
+    cannot get under ``limit`` (pathological), the smallest encoding produced is returned rather
+    than raising -- an oversized-but-present figure beats a lost result.
+    """
+
+    if len(data) <= limit:
+        return data, media_type
+    try:
+        import io
+
+        from PIL import Image
+    except Exception:
+        # Without Pillow we cannot resample; return the original and let transport handle it rather
+        # than losing the result.
+        return data, media_type
+
+    def _encode(edge: int) -> list[tuple[int, bytes, str]]:
+        with Image.open(io.BytesIO(data)) as source:
+            image = source.copy()
+        image.thumbnail((edge, edge), Image.Resampling.LANCZOS)
+        options: list[tuple[int, bytes, str]] = []
+        png_buffer = io.BytesIO()
+        (image if image.mode in {"RGB", "RGBA", "L"} else image.convert("RGB")).save(
+            png_buffer, format="PNG", optimize=True
+        )
+        options.append((png_buffer.tell(), png_buffer.getvalue(), "image/png"))
+        flat = image.convert("RGB")
+        jpeg_buffer = io.BytesIO()
+        flat.save(jpeg_buffer, format="JPEG", quality=85, optimize=True)
+        options.append((jpeg_buffer.tell(), jpeg_buffer.getvalue(), "image/jpeg"))
+        return options
+
+    best: tuple[int, bytes, str] | None = None
+    for edge in (_MODEL_IMAGE_EDGE, *_MODEL_IMAGE_FALLBACK_EDGES):
+        for size, encoded, mime in _encode(edge):
+            if size <= limit:
+                return encoded, mime
+            if best is None or size < best[0]:
+                best = (size, encoded, mime)
+    if best is not None:
+        return best[1], best[2]
+    return data, media_type
 
 
 def _concise_capability_error(message: str) -> str:
@@ -135,7 +204,7 @@ def _matrix_input(tool: CapabilityTool, arguments: Mapping[str, Any]) -> str | N
 
 
 def _matrix_output(tool: CapabilityTool, files: list[dict[str, Any]]) -> str | None:
-    """The artifact that continues the lineage, per this tool's declaration.
+    """The declared matrix artifact, whether it continues lineage or is a format-only derivative.
 
     Named rather than detected: CellBender emits three ``.h5`` matrices of which only the filtered
     one continues the analysis. A tool may declare an output it does not always produce -- cluster
@@ -162,6 +231,22 @@ def _matrix_output(tool: CapabilityTool, files: list[dict[str, Any]]) -> str | N
             "Declare primary_matrix_output in capability.yaml."
         )
     return None
+
+
+def _tree_size(root: Path) -> int:
+    """Total bytes of a store artifact's member files (a ``.zarr`` directory is one artifact)."""
+
+    return sum(item.stat().st_size for item in root.rglob("*") if item.is_file())
+
+
+def _file_digest(path: Path) -> str:
+    """Streaming sha256 of a file, used to content-address artifact files for dedup."""
+
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
@@ -228,10 +313,18 @@ class CapabilityExecutor:
         package: SkillPackage,
         tool: CapabilityTool,
         arguments: dict[str, Any],
+        *,
+        progress: Callable[[str], None] | None = None,
     ) -> dict[str, Any]:
         execution_id = str(uuid4())
         staging_dir = self.pending_root / execution_id
         staging_dir.mkdir()
+        # Decide the committed artifact directory up front so a skill can record a correct path to
+        # its own output; the same name is honored at commit (see _stage_result), so the path a
+        # skill writes into facts and the eventual on-disk location always agree.
+        artifact_relative_path = "artifacts/capabilities/" + capability_artifact_directory_name(
+            tool.name, execution_id
+        )
         context = CapabilityContext(
             scientific_session_id=self.session.session_id,
             session_dir=self.session.directory,
@@ -242,6 +335,7 @@ class CapabilityExecutor:
             state_revision=self.session.store.state.revision,
             state_facts=deepcopy(self.session.store.state.facts),
             state_lineage=deepcopy(self.session.store.state.lineage),
+            artifact_relative_path=artifact_relative_path,
         )
         resolved_arguments = _resolve_session_paths(arguments, self.session.directory)
         try:
@@ -261,7 +355,7 @@ class CapabilityExecutor:
                 environment = {"name": "current", "python": sys.executable}
             elif self.environment_broker is not None:
                 execution = await self._execute_in_environment(
-                    package, tool, resolved_arguments, context
+                    package, tool, resolved_arguments, context, progress=progress
                 )
                 value = execution.value
                 environment = execution.provenance
@@ -343,7 +437,7 @@ class CapabilityExecutor:
 
         lineage = self.session.store.state.lineage
         head = active_head(lineage)
-        continues_lineage = tool.primary_matrix_output is not None
+        continues_lineage = tool.primary_matrix_output is not None and tool.advances_lineage
         requested = _matrix_input(tool, resolved_arguments)
         source = "supplied"
 
@@ -457,6 +551,8 @@ class CapabilityExecutor:
         tool: CapabilityTool,
         arguments: dict[str, Any],
         context: CapabilityContext,
+        *,
+        progress: Callable[[str], None] | None = None,
     ) -> Any:
         """Run a compute capability off the event loop so the turn stays interruptible.
 
@@ -470,7 +566,9 @@ class CapabilityExecutor:
         broker = self.environment_broker
         assert broker is not None
         worker = asyncio.ensure_future(
-            asyncio.to_thread(broker.execute, package, tool, arguments, context)
+            asyncio.to_thread(
+                partial(broker.execute, package, tool, arguments, context, progress=progress)
+            )
         )
         try:
             return await asyncio.shield(worker)
@@ -555,12 +653,12 @@ class CapabilityExecutor:
                 ) from exc
             if not source.is_file():
                 raise CapabilityExecutionError(f"declared model_media does not exist: {source}")
-            size = source.stat().st_size
-            if size > MODEL_MEDIA_LIMIT_BYTES:
-                raise CapabilityExecutionError(
-                    f"model_media exceeds {MODEL_MEDIA_LIMIT_BYTES} bytes: {media.relative_path}"
-                )
-            total += size
+            # A figure over the per-image budget is downscaled to fit rather than discarded: the
+            # full-resolution artifact stays committed on disk and only the attached copy shrinks.
+            data, mime = _bounded_model_image(
+                source.read_bytes(), media.media_type, MODEL_MEDIA_LIMIT_BYTES
+            )
+            total += len(data)
             if total > MODEL_MEDIA_TOTAL_BYTES:
                 raise CapabilityExecutionError(
                     f"model_media totals more than {MODEL_MEDIA_TOTAL_BYTES} bytes; attach fewer "
@@ -569,8 +667,8 @@ class CapabilityExecutor:
             content.append(
                 {
                     "type": "image",
-                    "data": base64.b64encode(source.read_bytes()).decode("ascii"),
-                    "mimeType": media.media_type,
+                    "data": base64.b64encode(data).decode("ascii"),
+                    "mimeType": mime,
                 }
             )
         if content:
@@ -613,14 +711,21 @@ class CapabilityExecutor:
                 raise CapabilityExecutionError(
                     f"artifact escapes staging directory: {produced.relative_path}"
                 ) from exc
-            if not source.is_file():
+            # An artifact is either a single file (.h5ad) or a store directory (.zarr). The whole
+            # staging tree is moved atomically at commit, so a directory needs no special promotion;
+            # its recorded size is the sum of its member files rather than one stat().
+            if source.is_file():
+                size_bytes = source.stat().st_size
+            elif source.is_dir():
+                size_bytes = _tree_size(source)
+            else:
                 raise CapabilityExecutionError(f"declared artifact does not exist: {source}")
             files.append(
                 {
                     "name": produced.name,
                     "relative_path": produced.relative_path,
                     "media_type": produced.media_type,
-                    "size_bytes": source.stat().st_size,
+                    "size_bytes": size_bytes,
                 }
             )
         dispatch_lineage = dict(dispatch or {})
@@ -629,6 +734,7 @@ class CapabilityExecutor:
         # the compute has already been reported as successful.
         matrix_output = _matrix_output(tool, files)
         dispatch_lineage["matrix_output"] = matrix_output
+        dispatch_lineage["advances_lineage"] = tool.advances_lineage
         dispatch_lineage["operation"] = tool.lineage_operation
         if has_prepared_path(result.facts_patch):
             raise CapabilityExecutionError(
@@ -636,6 +742,12 @@ class CapabilityExecutor:
                 "remove it from the skill result"
             )
         node_facts, _ = partition_facts_patch(result.facts_patch)
+        if matrix_output is not None and not tool.advances_lineage and node_facts:
+            raise CapabilityExecutionError(
+                f"tool {tool.name} declares a non-advancing matrix output but returned "
+                "node-scoped scientific facts; a format-only derivative cannot change the "
+                "analysis state"
+            )
         if matrix_output is None and node_facts:
             requested = dispatch_lineage.get("requested_input")
             parent = dispatch_lineage.get("resolved_input_execution_id")
@@ -650,9 +762,18 @@ class CapabilityExecutor:
                     "a read-only tool returned node-scoped facts before an analysis version "
                     "existed, so there is no lineage node to attach them to"
                 )
+        # The committed artifact directory is named for the action, not just its UUID, so a session
+        # tree reads legibly. The name is decided at dispatch, handed to the skill on the context,
+        # recorded in result.json, and honored at commit, so the model-facing paths and the
+        # eventual on-disk location always agree.
+        artifact_relative_path = context.artifact_relative_path or (
+            "artifacts/capabilities/"
+            + capability_artifact_directory_name(tool.name, context.execution_id)
+        )
         persisted = {
             "schema_version": result.schema_version,
             "execution_id": context.execution_id,
+            "artifact_relative_path": artifact_relative_path,
             "lineage": dispatch_lineage,
             "skill_id": package.manifest.skill_id,
             "skill_version": package.manifest.version,
@@ -692,7 +813,6 @@ class CapabilityExecutor:
                 "lineage": dispatch_lineage,
             },
         )
-        artifact_relative_path = f"artifacts/capabilities/{context.execution_id}"
         artifact_path = (self.session.directory / artifact_relative_path).resolve()
         model_files = [
             {
@@ -739,6 +859,8 @@ class CapabilityExecutor:
 
         dispatch = data.get("lineage")
         if not isinstance(dispatch, Mapping) or not dispatch.get("matrix_output"):
+            return
+        if dispatch.get("advances_lineage", True) is False:
             return
         if dispatch.get("branch_intent"):
             return
@@ -818,6 +940,7 @@ class CapabilityExecutor:
             return self._checkout_state_patch(data, session_facts, state)
 
         matrix_output = dispatch.get("matrix_output")
+        advances_lineage = dispatch.get("advances_lineage", True) is not False
         branch_intent = bool(dispatch.get("branch_intent"))
         adopt_intent = bool(dispatch.get("adopt_intent"))
         requested = dispatch.get("requested_input")
@@ -833,7 +956,7 @@ class CapabilityExecutor:
             )
         head = active_head(lineage)
 
-        if not isinstance(matrix_output, str) or not matrix_output:
+        if not advances_lineage or not isinstance(matrix_output, str) or not matrix_output:
             # Read-only: no node, no head movement. Its node-scoped evidence still has to be
             # attached to the node it describes, or a later checkout loses it.
             if requested is not None and parent is None and node_facts:
@@ -908,14 +1031,47 @@ class CapabilityExecutor:
 
     def commit(self, execution_id: str) -> bool:
         pending = self.pending_root / execution_id
-        final = self.artifact_root / execution_id
         if execution_id in self.session.store.state.artifacts:
             return False
-        source = pending if pending.is_dir() else final
+        # Normal path: the staging tree is still under pending/<id>. Recovery path: a prior attempt
+        # already moved it into the artifact root, where it carries its descriptive name; find it by
+        # the ID preserved as the directory's suffix (or the whole name, pre-naming).
+        source = pending
+        if not source.is_dir():
+            matches = [
+                item
+                for item in (self.artifact_root.iterdir() if self.artifact_root.exists() else [])
+                if item.is_dir()
+                and (item.name == execution_id or item.name.endswith(f"--{execution_id}"))
+                and (item / "result.json").is_file()
+            ]
+            if len(matches) != 1:
+                raise CapabilityExecutionError(
+                    f"pending capability result not found: {execution_id}"
+                )
+            source = matches[0]
         result_path = source / "result.json"
         if not result_path.is_file():
             raise CapabilityExecutionError(f"pending capability result not found: {execution_id}")
         data = json.loads(result_path.read_text(encoding="utf-8"))
+        if source is not pending:
+            # Recovery: the tree is already in the artifact root; that location is authoritative.
+            final = source
+        else:
+            # Normal: the staging step chose the descriptive directory name and recorded it; honor
+            # it so the paths already handed to the model resolve. Validate it stays directly under
+            # the artifact root and still carries this execution ID; fall back to the legacy name.
+            recorded_relative = data.get("artifact_relative_path")
+            if isinstance(recorded_relative, str) and recorded_relative:
+                final = self.session.directory / recorded_relative
+                if final.parent != self.artifact_root or not (
+                    final.name == execution_id or final.name.endswith(f"--{execution_id}")
+                ):
+                    raise CapabilityExecutionError(
+                        f"unsafe capability artifact directory: {recorded_relative}"
+                    )
+            else:
+                final = self.artifact_root / execution_id
         artifact_relative = str(final.relative_to(self.session.directory))
         artifact_record = {
             "kind": "capability-result",
@@ -962,8 +1118,108 @@ class CapabilityExecutor:
             )
         except _AlreadyCommitted:
             return False
+        # Dedup after the commit is durable, not under the session lock: the parent is already
+        # immutable and hard-linking never changes content, so it is safe to do outside the lock and
+        # must never fail a commit that already succeeded.
+        parent_id = data.get("lineage", {}).get("resolved_input_execution_id")
+        with suppress(OSError):
+            self._dedup_against_parent(execution_id, parent_id)
         self.session.refresh_outputs_best_effort()
         return True
+
+    def _committed_artifact_dir(self, execution_id: str) -> Path | None:
+        """Resolve a committed execution's on-disk directory.
+
+        The directory is named ``<action>--<execution_id>``, so it can no longer be reconstructed
+        from the ID alone. Prefer the path recorded on the artifact record (authoritative); fall
+        back to scanning the artifact root for the ID as the whole name (legacy) or the ``--<id>``
+        suffix. Returns ``None`` when no single directory matches.
+        """
+
+        record = self.session.store.state.artifacts.get(execution_id)
+        if isinstance(record, Mapping):
+            recorded = record.get("path")
+            if isinstance(recorded, str) and recorded:
+                candidate = self.session.directory / recorded
+                if candidate.is_dir():
+                    return candidate
+        matches = [
+            item
+            for item in (self.artifact_root.iterdir() if self.artifact_root.exists() else [])
+            if item.is_dir()
+            and (item.name == execution_id or item.name.endswith(f"--{execution_id}"))
+        ]
+        return matches[0] if len(matches) == 1 else None
+
+    def _dedup_against_parent(self, execution_id: str, parent_execution_id: Any) -> tuple[int, int]:
+        """Hard-link a committed artifact's files to byte-identical files in its lineage parent.
+
+        A step usually changes only part of the matrix (adds an embedding, an obs column), so most
+        of a ``.zarr`` store's chunk files are byte-identical to the parent version's. Replacing
+        each such file with a hard link to the parent's frozen copy makes the two versions share
+        bytes on disk; retention's reclaimable accounting (which measures by ``st_nlink``) then
+        reflects the true cost of a prune. Artifacts are immutable, so sharing an inode is safe.
+
+        Best-effort and per-file guarded: any file that cannot be linked -- cross-device, a race --
+        simply keeps its own independent copy. Returns ``(linked_files, reclaimed_bytes)``.
+        """
+
+        if not isinstance(parent_execution_id, str) or not parent_execution_id:
+            return (0, 0)
+        new_root = self._committed_artifact_dir(execution_id)
+        parent_root = self._committed_artifact_dir(parent_execution_id)
+        if new_root is None or parent_root is None:
+            return (0, 0)
+        child_files = [
+            item
+            for item in sorted(new_root.rglob("*"))
+            if item.is_file() and not item.is_symlink()
+        ]
+        if not child_files:
+            return (0, 0)
+        # Match by CONTENT, not by path. Each step names its store differently (pca.zarr vs
+        # neighbors.zarr), so the same unchanged array lives at a different artifact-relative path
+        # in parent and child; a path match would never fire. Index the parent by digest, restricted
+        # to sizes the child has so a parent file that cannot match is never read.
+        child_sizes = {item.stat().st_size for item in child_files}
+        parent_by_digest: dict[str, Path] = {}
+        for parent_file in parent_root.rglob("*"):
+            try:
+                if not parent_file.is_file() or parent_file.is_symlink():
+                    continue
+                if parent_file.stat().st_size not in child_sizes:
+                    continue
+                parent_by_digest.setdefault(_file_digest(parent_file), parent_file)
+            except OSError:
+                continue
+
+        linked = 0
+        reclaimed = 0
+        for new_file in child_files:
+            link_tmp: Path | None = None
+            try:
+                new_stat = new_file.stat()
+                match_file = parent_by_digest.get(_file_digest(new_file))
+                if match_file is None:
+                    continue
+                match_stat = match_file.stat()
+                if (new_stat.st_dev, new_stat.st_ino) == (match_stat.st_dev, match_stat.st_ino):
+                    continue  # already one inode
+                if new_stat.st_dev != match_stat.st_dev:
+                    continue  # cross-device: cannot hard-link
+                if not filecmp.cmp(new_file, match_file, shallow=False):
+                    continue  # digest-collision guard
+                link_tmp = new_file.with_name(f".{new_file.name}.dedup-{uuid4().hex}")
+                os.link(match_file, link_tmp)
+                os.replace(link_tmp, new_file)  # atomic swap; frees the new file's own inode
+                linked += 1
+                reclaimed += new_stat.st_size
+            except OSError:
+                if link_tmp is not None:
+                    with suppress(OSError):
+                        link_tmp.unlink()
+                continue
+        return (linked, reclaimed)
 
     def commit_from_hook(self, input_data: dict[str, Any]) -> bool:
         execution_id = _find_execution_id(input_data.get("tool_response", input_data))
@@ -1010,31 +1266,52 @@ class CapabilityExecutor:
         """
 
         recovered: list[str] = []
+        state_artifacts = self.session.store.state.artifacts
+        committed_directories: set[str] = set()
+        for execution_id, raw_record in state_artifacts.items():
+            committed_directories.add(execution_id)  # legacy ``artifacts/capabilities/<id>``
+            if isinstance(raw_record, Mapping):
+                recorded_path = raw_record.get("path")
+                if isinstance(recorded_path, str) and recorded_path:
+                    committed_directories.add(Path(recorded_path).name)
+
         candidates = list(self.pending_root.iterdir() if self.pending_root.exists() else [])
         candidates.extend(
             path
             for path in (self.artifact_root.iterdir() if self.artifact_root.exists() else [])
-            if path.name not in self.session.store.state.artifacts
+            if path.name not in committed_directories
         )
         order = self._staged_sequence()
-        pending: list[tuple[int, Path]] = []
-        unsequenced: list[Path] = []
+        pending: list[tuple[int, str, Path]] = []
+        unsequenced: list[tuple[str, Path]] = []
         for path in candidates:
             if not path.is_dir() or not (path / "result.json").is_file():
                 continue
-            sequence = order.get(path.name)
+            try:
+                staged = json.loads((path / "result.json").read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                staged = {}
+            recorded_execution_id = staged.get("execution_id")
+            execution_id = (
+                recorded_execution_id
+                if isinstance(recorded_execution_id, str) and recorded_execution_id
+                else path.name
+            )
+            sequence = order.get(execution_id)
             if sequence is None:
-                unsequenced.append(path)
+                unsequenced.append((execution_id, path))
             else:
-                pending.append((sequence, path))
-        for _, path in sorted(pending, key=lambda item: (item[0], item[1].name)):
-            if self.commit(path.name):
-                recovered.append(path.name)
-        for path in sorted(unsequenced):
-            self._quarantine(path)
+                pending.append((sequence, execution_id, path))
+        for _, execution_id, _path in sorted(
+            pending, key=lambda item: (item[0], item[1], item[2].name)
+        ):
+            if self.commit(execution_id):
+                recovered.append(execution_id)
+        for execution_id, path in sorted(unsequenced, key=lambda item: (item[0], item[1].name)):
+            self._quarantine(path, execution_id=execution_id)
         return recovered
 
-    def _quarantine(self, path: Path) -> None:
+    def _quarantine(self, path: Path, *, execution_id: str | None = None) -> None:
         """Move an unorderable staged result aside and record why."""
 
         target = self.quarantine_root / path.name
@@ -1048,7 +1325,7 @@ class CapabilityExecutor:
             self.session.store.record(
                 "capability.result_quarantined",
                 payload={
-                    "execution_id": path.name,
+                    "execution_id": execution_id or path.name,
                     "reason": "no capability.result_staged event; commit order is undefined",
                     "path": str(target.relative_to(self.session.directory)),
                 },

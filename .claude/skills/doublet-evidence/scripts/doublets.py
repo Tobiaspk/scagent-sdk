@@ -10,14 +10,42 @@ from typing import Any
 SAMPLE_BYTES = 1024 * 1024
 
 
+def _read_matrix(path):
+    """Read an AnnData artifact, tolerating both .h5ad files and .zarr stores (ADR 0011)."""
+    import anndata as ad
+
+    return ad.read_zarr(path) if str(path).endswith(".zarr") else ad.read_h5ad(path)
+
+
+def _write_matrix(adata, path):
+    """Write an AnnData artifact: a .zarr store (blosc) or a gzipped .h5ad file (ADR 0011)."""
+    import anndata as ad
+
+    if str(path).endswith(".zarr"):
+        ad.settings.zarr_write_format = 2  # v2 until the v3 sharding/dedup design lands
+        adata.write_zarr(path)
+    else:
+        adata.write_h5ad(path, compression="gzip")
+
 def _identity(kind: str, value: Any) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()
     return f"{kind}:sha256:{hashlib.sha256(encoded).hexdigest()}"
 
 
 def _dataset_fingerprint(path: Path) -> str:
-    size = path.stat().st_size
     digest = hashlib.sha256()
+    if path.is_dir():
+        # A .zarr artifact is a store directory (ADR 0011): fingerprint every member file by its
+        # in-store path and content, deterministically, rather than open() the directory (which
+        # raises IsADirectoryError).
+        digest.update(b"scagent-dataset-v1-store\0")
+        for member in sorted(item for item in path.rglob("*") if item.is_file()):
+            digest.update(f"{member.relative_to(path).as_posix()}\0{member.stat().st_size}\0".encode())
+            with member.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(SAMPLE_BYTES), b""):
+                    digest.update(chunk)
+        return f"sha256:{digest.hexdigest()}"
+    size = path.stat().st_size
     digest.update(f"scagent-dataset-v1\0{size}\0".encode())
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(SAMPLE_BYTES), b""):
@@ -247,9 +275,9 @@ def _execute_evidence(arguments: dict[str, Any], context: Any) -> dict[str, Any]
     matplotlib.use("Agg")
     ad, plt, np, pd, rsc, sc = _scientific_modules()
     path = Path(str(arguments["path"])).expanduser().resolve()
-    if not path.is_file() or path.suffix.lower() != ".h5ad":
+    if not path.exists() or path.suffix.lower() not in (".h5ad", ".zarr"):
         raise ValueError("doublet evidence requires an H5AD file")
-    adata = sc.read_h5ad(path)
+    adata = _read_matrix(path)
     raw_provenance = adata.uns.get("scagent_sdk")
     provenance = dict(raw_provenance) if isinstance(raw_provenance, dict) else {}
     if not bool(arguments.get("overwrite_existing_predictions", False)) and any(
@@ -440,9 +468,9 @@ def _execute_evidence(arguments: dict[str, Any], context: Any) -> dict[str, Any]
             ),
         },
     )
-    output_relative = "doublet-annotated.h5ad"
+    output_relative = "doublet-annotated.zarr"
     output_path = context.staging_dir / output_relative
-    final_path = f"artifacts/capabilities/{context.execution_id}/{output_relative}"
+    final_path = f"{context.artifact_relative_path}/{output_relative}"
     provenance = dict(provenance)
     provenance.update(
         {
@@ -452,7 +480,7 @@ def _execute_evidence(arguments: dict[str, Any], context: Any) -> dict[str, Any]
         }
     )
     adata.uns["scagent_sdk"] = provenance
-    adata.write_h5ad(output_path, compression="gzip")
+    _write_matrix(adata, output_path)
     _write_report(
         context.staging_dir / "doublet-evidence.md",
         batch_key=batch_key,
@@ -497,7 +525,7 @@ def _execute_evidence(arguments: dict[str, Any], context: Any) -> dict[str, Any]
             {
                 "name": "doublet-annotated-anndata",
                 "relative_path": output_relative,
-                "media_type": "application/x-hdf5",
+                "media_type": "application/vnd.zarr",
             },
             {
                 "name": "doublet-calls",
@@ -623,10 +651,10 @@ def _execute_review(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     matplotlib.use("Agg")
     _ad, _plt, np, _pd, _rsc, sc = _scientific_modules()
     path = Path(str(arguments["path"])).expanduser().resolve()
-    if not path.is_file():
+    if not path.exists():
         raise FileNotFoundError(path)
     decision, rationale, _confirmed, maximum = _review_parameters(arguments)
-    adata = sc.read_h5ad(path)
+    adata = _read_matrix(path)
     provenance = adata.uns.get("scagent_sdk")
     evidence = _current_evidence(context, path, provenance)
     if "predicted_doublet" not in adata.obs:
@@ -680,9 +708,9 @@ def _execute_review(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
                 "removed_cells": n_predicted,
             },
         )
-        output_relative = "doublet-filtered-raw-counts.h5ad"
+        output_relative = "doublet-filtered-raw-counts.zarr"
         output_path = context.staging_dir / output_relative
-        final_path = f"artifacts/capabilities/{context.execution_id}/{output_relative}"
+        final_path = f"{context.artifact_relative_path}/{output_relative}"
         filtered.uns = {
             "scagent_sdk": {
                 "schema_version": 1,
@@ -702,7 +730,7 @@ def _execute_review(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
                 "source_count_location": count_source,
             },
         }
-        filtered.write_h5ad(output_path, compression="gzip")
+        _write_matrix(filtered, output_path)
         stat = output_path.stat()
         output_fingerprint = _dataset_fingerprint(output_path)
         filter_payload = {
@@ -719,9 +747,9 @@ def _execute_review(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
                 "fingerprint": output_fingerprint,
                 "fingerprint_mode": "full",
                 "format": {
-                    "extension": "h5ad",
-                    "suffixes": [".h5ad"],
-                    "byte_signature": "hdf5",
+                    "extension": "zarr",
+                    "suffixes": [".zarr"],
+                    "byte_signature": "zarr",
                     "extension_signature_consistent": True,
                 },
                 "lineage": {
@@ -756,7 +784,7 @@ def _execute_review(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
             {
                 "name": "doublet-filtered-raw-counts",
                 "relative_path": output_relative,
-                "media_type": "application/x-hdf5",
+                "media_type": "application/vnd.zarr",
             }
         )
     review = {

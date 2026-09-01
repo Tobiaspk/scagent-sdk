@@ -185,6 +185,54 @@ def test_pathological_state_is_hashed_and_points_to_complete_authoritative_file(
     assert len(plan.context) < 110_000
 
 
+def test_normal_large_state_keeps_decision_ready_projection_inline(tmp_path: Path) -> None:
+    session = AnalysisSession.create(tmp_path, title="Decision-ready rollover")
+    session.checkpoint_facts(
+        {
+            "analysis": {"clustering": {"key": "leiden_res_1_0", "n_clusters": 29}},
+            "batch": {
+                "evidence": {
+                    "evidence_id": "batch-evidence:abc",
+                    "status": "complete",
+                    "recommendation": "integration_recommended",
+                    "terminal_summary": "Donors separate, but design is unknown.",
+                    "supported_identity_pairs": [
+                        {"shared_genes": ["SFTPA1", "SFTPB"]} for _ in range(500)
+                    ],
+                }
+            },
+            "cluster_qc": {
+                "status": "complete",
+                "review_status": "resolved",
+                "review_clusters": [],
+                "available_cluster_heatmaps": [f"cluster-{i}.png" for i in range(500)],
+            },
+        },
+        reason="realistic large scientific state",
+    )
+    session.store.record(
+        "state.decision_recorded",
+        payload={"reason": "user choice"},
+        state_patch={
+            "decisions": {
+                "batch_handling": {
+                    "decision": "integrate",
+                    "evidence_id": "batch-evidence:abc",
+                }
+            }
+        },
+    )
+
+    plan = session.plan_resume(runtime="claude-agent-sdk", model_profile="new-profile")
+
+    assert '"evidence_id": "batch-evidence:abc"' in plan.context
+    assert '"decision": "integrate"' in plan.context
+    assert '"review_status": "resolved"' in plan.context
+    assert '"_drilldown_omitted"' in plan.context
+    assert '"_compacted": true' not in plan.context
+    assert "Do not read state.json merely to reconstruct ordinary continuation" in plan.context
+
+
 def test_open_replays_event_written_after_last_state_checkpoint(tmp_path: Path) -> None:
     session = AnalysisSession.create(tmp_path, title="Replay", session_id="replay")
     event_path = session.store.events_path

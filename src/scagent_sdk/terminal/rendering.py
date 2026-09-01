@@ -103,14 +103,28 @@ class ElapsedStatus:
     whether a long compute is stuck.
     """
 
-    def __init__(self, label: str, *, clock: Callable[[], float] = monotonic) -> None:
+    def __init__(
+        self,
+        label: str,
+        *,
+        clock: Callable[[], float] = monotonic,
+        progress: Callable[[], str | None] | None = None,
+    ) -> None:
         self.label = label
         self._clock = clock
         self._started = clock()
+        # Read on every refresh so a long compute can report its own progress (e.g. scVI epochs)
+        # in the same line as the elapsed timer, without any cross-thread rich manipulation: the
+        # worker thread only writes a string, this render thread only reads it.
+        self._progress = progress
 
     def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
         elapsed = max(int(self._clock() - self._started), 0)
-        yield Text.assemble(f"{self.label}...", (f" ({format_elapsed(elapsed)})", "dim"))
+        text = Text.assemble(f"{self.label}...", (f" ({format_elapsed(elapsed)})", "dim"))
+        detail = self._progress() if self._progress is not None else None
+        if detail:
+            text.append(f" {detail}", style="dim")
+        yield text
 
 
 def delatex(text: str) -> str:
@@ -147,6 +161,7 @@ class RichRuntimeObserver:
         self.reasoning_log = reasoning_log
         self._status: Status | None = None
         self._status_label: str | None = None
+        self._progress_text: str | None = None
         self._rendered_text: list[str] = []
         self._emitted_thoughts: list[str] = []
         self._turn_header_pending = False
@@ -198,7 +213,9 @@ class RichRuntimeObserver:
     def _start_status(self, label: str = _THINKING) -> None:
         self._stop_status()
         self._status_label = label
-        self._status = self.console.status(ElapsedStatus(label), spinner="dots")
+        self._status = self.console.status(
+            ElapsedStatus(label, progress=lambda: self._progress_text), spinner="dots"
+        )
         self._status.start()
 
     def _render_markdown(self, text: str, *, dim: bool = False) -> None:
@@ -240,6 +257,27 @@ class RichRuntimeObserver:
         self._context_rollover_pending = True
         self._start_status(_RECONSTRUCTING_CONTEXT)
 
+    def on_context_compacted(
+        self,
+        *,
+        summary: str,
+        tokens_before: int,
+        tokens_after: int,
+    ) -> None:
+        """Show that the replayed conversation was trimmed; durable state is untouched."""
+
+        resumed = self._status is not None
+        self._stop_status()
+        self.console.print(
+            f"⤵ Compacted conversation for replay ({tokens_before / 1000:.0f}K→"
+            f"{tokens_after / 1000:.0f}K est. tokens): {summary}. "
+            "Scientific state and artifacts remain preserved.",
+            style="dim",
+            markup=False,
+        )
+        if resumed:
+            self._start_status(_THINKING)
+
     def on_message(self, message: RuntimeMessage) -> None:
         """Render one streamed block, then resume waiting visibly.
 
@@ -271,11 +309,19 @@ class RichRuntimeObserver:
         # The printed line is the durable record of what ran; the spinner below it carries the
         # elapsed time, which is the only feedback during a compute that lasts minutes.
         self._stop_status()
+        self._progress_text = None
         self.console.print(f"[cyan]▶[/cyan] {activity.label}...")
         self._start_status(activity.label)
 
+    def on_tool_progress(self, activity: ToolActivity, text: str) -> None:
+        # Compute workers stream their own progress (scVI epochs, tqdm bars) from a subprocess
+        # thread; store the latest line so the spinner's renderable picks it up on its next
+        # refresh. A plain string write is all that crosses the thread boundary — no rich call.
+        self._progress_text = text.strip() or None
+
     def on_tool_finished(self, activity: ToolActivity, summary: str | None) -> None:
         self._stop_status()
+        self._progress_text = None
         self.console.print(f"[green]✓[/green] {activity.label} done")
         if summary:
             self.console.print(f"  ⤷ {summary}", style="dim", markup=False)
@@ -284,6 +330,7 @@ class RichRuntimeObserver:
 
     def on_tool_failed(self, activity: ToolActivity, error: str) -> None:
         self._stop_status()
+        self._progress_text = None
         self.console.print(f"[red]✗[/red] {activity.label} failed")
         self.console.print(f"  {error}", style="red", markup=False)
         # The turn is not over: the model still has to read the failure and decide what to do.

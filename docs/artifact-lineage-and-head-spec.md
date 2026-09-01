@@ -314,6 +314,12 @@ detach the analysis from its lineage. Mid-session adoption must be explicit.
 argument schema (`capabilities/manifest.py`). "Any `.h5ad` artifact" is too implicit for a future
 tool that writes more than one.
 
+A matrix output normally creates the next analysis node. A format-only delivery instead declares
+the same explicit `primary_matrix_output` plus `advances_lineage: false`: the artifact records the
+matrix it consumed and the matrix it published, but creates no node, does not move the active head,
+and cannot return node-scoped scientific facts. This keeps a portable H5AD from replacing the Zarr
+working version or breaking dedup for the next scientific transformation.
+
 Declaration alone is insufficient: an omitted `path` never reaches `execute` today. 20 manifests
 declare `required: [path]` with `additionalProperties: false`, so schema validation rejects the call
 first. D5 therefore also requires:

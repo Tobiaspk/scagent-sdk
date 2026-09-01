@@ -1,6 +1,6 @@
 """Human-browsable projection of committed scientific-session artifacts.
 
-Capability artifacts remain authoritative under ``artifacts/capabilities/<execution-id>``.
+Capability artifacts remain authoritative under ``artifacts/capabilities/<action>--<execution-id>``.
 This module builds a disposable review surface from those records using relative symlinks, so
 large scientific files are never copied merely to make a session easier to navigate.
 
@@ -53,6 +53,7 @@ _DATA_MEDIA_TYPES = frozenset(
         "application/x-h5ad",
         "application/x-anndata",
         "application/x-zarr",
+        "application/vnd.zarr",
         "application/x-numpy",
     }
 )
@@ -243,8 +244,10 @@ def _classify(relative_path: str, media_type: str) -> str | None:
 
 def _is_final_data(name: str, relative_path: str, tool_name: str) -> bool:
     value = " ".join((name, relative_path, tool_name)).lower().replace("_", "-")
-    return "final-annotated" in value or (
-        "finalize-analysis" in value and Path(relative_path).suffix.lower() == ".h5ad"
+    return (
+        "final-annotated" in value
+        or ("finalize-analysis" in value and Path(relative_path).suffix.lower() == ".h5ad")
+        or (tool_name == "export_anndata" and Path(relative_path).suffix.lower() == ".h5ad")
     )
 
 
@@ -282,7 +285,13 @@ def _safe_source(session_dir: Path, artifact_path: str, relative_path: str) -> P
         source.relative_to(root)
     except ValueError:
         return None
-    return source if source.is_file() else None
+    if source.is_file():
+        return source
+    # Zarr is one declared data artifact backed by a directory tree. Keep the exception narrow:
+    # arbitrary directories are not output-view entries merely because a skill listed them.
+    if source.is_dir() and Path(relative_path).suffix.lower() == ".zarr":
+        return source
+    return None
 
 
 def _atomic_write_text(path: Path, value: str) -> None:

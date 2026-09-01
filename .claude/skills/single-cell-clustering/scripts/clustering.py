@@ -8,27 +8,63 @@ from pathlib import Path
 from typing import Any
 
 
+def _read_matrix(path):
+    """Read an AnnData artifact, tolerating both .h5ad files and .zarr stores (ADR 0011)."""
+    import anndata as ad
+
+    return ad.read_zarr(path) if str(path).endswith(".zarr") else ad.read_h5ad(path)
+
+
+def _write_matrix(adata, path):
+    """Write an AnnData artifact: a .zarr store (blosc) or a gzipped .h5ad file (ADR 0011)."""
+    import anndata as ad
+
+    if str(path).endswith(".zarr"):
+        ad.settings.zarr_write_format = 2  # v2 until the v3 sharding/dedup design lands
+        adata.write_zarr(path)
+    else:
+        adata.write_h5ad(path, compression="gzip")
+
+
+def _to_gpu(adata: Any) -> None:
+    from rapids_singlecell.get import anndata_to_GPU
+
+    anndata_to_GPU(adata, convert_all=True)
+
+
+def _to_cpu(adata: Any) -> None:
+    from rapids_singlecell.get import anndata_to_CPU
+
+    anndata_to_CPU(adata, convert_all=True)
+
 def _identity(kind: str, value: Any) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()
     return f"{kind}:sha256:{hashlib.sha256(encoded).hexdigest()}"
 
 
 def _load(arguments: dict[str, Any]) -> tuple[Path, Any]:
-    import scanpy as sc
 
     path = Path(str(arguments["path"])).expanduser().resolve()
-    if not path.is_file():
+    if not path.exists():
         raise FileNotFoundError(path)
-    return path, sc.read_h5ad(path)
+    return path, _read_matrix(path)
 
 
 def cluster_cells(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
-    import scanpy as sc
+    import rapids_singlecell as rsc
 
     path, adata = _load(arguments)
     neighbors_key = str(arguments.get("neighbors_key", "neighbors"))
     cluster_key = str(arguments.get("cluster_key", "leiden"))
-    resolution = float(arguments.get("resolution", 0.8))
+    if arguments.get("resolution") is None:
+        # Deliberately no default. Granularity is a scientific choice that differs by phase
+        # (high for exploratory cluster QC, interpretable for annotation), and an inherited
+        # convention value silently decides it. See SKILL.md / references/clustering-contract.md.
+        raise ValueError(
+            "resolution is required: state the Leiden granularity for the phase you are in "
+            "rather than accepting a default (see the single-cell-clustering instructions)"
+        )
+    resolution = float(arguments["resolution"])
     seed = int(arguments.get("random_seed", 0))
     if neighbors_key not in adata.uns:
         raise ValueError(f"neighbor graph {neighbors_key!r} is absent")
@@ -37,15 +73,16 @@ def cluster_cells(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
             f"obs column {cluster_key!r} already exists; choose a new cluster_key "
             "to avoid overwriting labels"
         )
-    sc.tl.leiden(
+    _to_gpu(adata)
+    rsc.tl.leiden(
         adata,
         resolution=resolution,
         key_added=cluster_key,
         neighbors_key=None if neighbors_key == "neighbors" else neighbors_key,
         random_state=seed,
-        flavor="igraph",
-        n_iterations=2,
+        n_iterations=100,
     )
+    _to_cpu(adata)
     labels = adata.obs[cluster_key].astype(str)
     metadata = dict(adata.uns.get("scagent_sdk", {}))
     representation_id = metadata.get("representation_id") or metadata.get("neighbor_graph_id")
@@ -65,6 +102,7 @@ def cluster_cells(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
             "cluster_key": cluster_key,
             "resolution": resolution,
             "random_seed": seed,
+            "compute_backend": "rapids_singlecell",
             "labels": sorted(
                 zip(map(str, adata.obs_names), map(str, labels), strict=True)
             ),
@@ -75,12 +113,13 @@ def cluster_cells(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
             "cell_set_id": cell_set_id,
             "representation_id": representation_id,
             "clustering_id": clustering_id,
+            "compute_backend": "rapids_singlecell",
             "clustering_key": cluster_key,
         }
     )
     adata.uns["scagent_sdk"] = metadata
-    output_name = "clustered.h5ad"
-    adata.write_h5ad(context.staging_dir / output_name, compression="gzip")
+    output_name = "clustered.zarr"
+    _write_matrix(adata, context.staging_dir / output_name)
     sizes = labels.value_counts().sort_index()
     sizes.rename_axis("cluster").rename("n_cells").to_csv(
         context.staging_dir / "cluster-sizes.csv"
@@ -98,6 +137,7 @@ def cluster_cells(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
             "n_clusters": int(sizes.size),
             "cluster_sizes": {str(key): int(value) for key, value in sizes.items()},
             "clustering_id": clustering_id,
+            "compute_backend": "rapids_singlecell",
         },
         "facts_patch": {
             "analysis": {
@@ -115,7 +155,6 @@ def cluster_cells(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
                 },
             },
             "cluster_qc": None,
-            "batch": None,
             "annotation": None,
             "finalization": None,
         },
@@ -123,7 +162,7 @@ def cluster_cells(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
             {
                 "name": "clustered-anndata",
                 "relative_path": output_name,
-                "media_type": "application/x-hdf5",
+                "media_type": "application/vnd.zarr",
             },
             {
                 "name": "cluster-sizes",
@@ -164,9 +203,9 @@ def rank_groups(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
         adata, group=None, key=f"rank_genes_{group_key}"
     )
     table.to_csv(context.staging_dir / "ranked-genes.csv", index=False)
-    output_name = "ranked-groups.h5ad"
-    final_path = f"artifacts/capabilities/{context.execution_id}/{output_name}"
-    adata.write_h5ad(context.staging_dir / output_name, compression="gzip")
+    output_name = "ranked-groups.zarr"
+    final_path = f"{context.artifact_relative_path}/{output_name}"
+    _write_matrix(adata, context.staging_dir / output_name)
     evidence_id = _identity(
         "ranked-genes",
         {
@@ -200,7 +239,7 @@ def rank_groups(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
                     "group_key": group_key,
                     "method": method,
                     "artifact_path": (
-                        f"artifacts/capabilities/{context.execution_id}/ranked-genes.csv"
+                        f"{context.artifact_relative_path}/ranked-genes.csv"
                     ),
                     "annotated_path": final_path,
                 }
@@ -210,7 +249,7 @@ def rank_groups(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
             {
                 "name": "ranked-groups-anndata",
                 "relative_path": output_name,
-                "media_type": "application/x-hdf5",
+                "media_type": "application/vnd.zarr",
             },
             {
                 "name": "ranked-genes",

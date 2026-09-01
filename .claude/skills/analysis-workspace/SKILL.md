@@ -28,6 +28,9 @@ guarantee the figure returns for inspection, and debugging a plotting script thr
 calls is the slowest way to answer a question. Write custom code for genuine gaps, not for work a
 tool already does.
 
+Use `export_anndata` for format-only H5AD delivery instead of hand-writing an AnnData conversion;
+it preserves the complete object, verifies the round trip, and registers the result.
+
 Do not use the shell to discover your own capabilities. Which packages are importable and which
 reference models are cached is stated in your instructions; `find` over shared or networked trees
 (`/`, `/data1`, an environment prefix) is slow, times out, and answers nothing you were not

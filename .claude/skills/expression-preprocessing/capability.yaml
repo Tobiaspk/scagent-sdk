@@ -1,11 +1,11 @@
 schema_version: 1
 skill:
   id: expression-preprocessing
-  version: "0.1.0"
+  version: "0.2.0"
   description: Independent normalization and highly-variable-gene selection.
 tools:
   - name: normalize_single_cell_expression
-    description: Normalize a raw-count layer to a target total and log1p-transform X while preserving raw counts.
+    description: Normalize a raw-count layer and log1p-transform X on the GPU with RAPIDS SingleCell while preserving raw counts.
     entrypoint: scripts/preprocess.py:normalize_expression
     environment: gpu-singlecell
     activity_label: Normalizing expression
@@ -20,7 +20,7 @@ tools:
     primary_matrix_input: path
     primary_matrix_output: log-normalized-anndata
   - name: select_highly_variable_genes
-    description: Compute and record a highly-variable-gene mask without subsetting or running dimensionality reduction.
+    description: Compute and record a highly-variable-gene mask with RAPIDS SingleCell without subsetting or running dimensionality reduction.
     entrypoint: scripts/preprocess.py:select_hvg
     environment: gpu-singlecell
     activity_label: Selecting variable genes

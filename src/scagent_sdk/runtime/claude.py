@@ -4,13 +4,23 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import os
 import sys
+from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Any
 
 from scagent_sdk.errors import ContextRolloverRequired, RuntimeExecutionError
 from scagent_sdk.runtime.claude_store import ScientificSessionTranscriptStore
+from scagent_sdk.runtime.compaction import (
+    CHARS_PER_TOKEN,
+    DEFAULT_IMAGE_TOKEN_ESTIMATE,
+    DEFAULT_KEEP_TAIL_ENTRIES,
+    DEFAULT_MAX_CONTEXT_IMAGES,
+    CompactionConfig,
+    CompactionStats,
+)
 from scagent_sdk.runtime.observer import NullRuntimeObserver, RuntimeObserver
 from scagent_sdk.runtime.protocol import (
     RuntimeMessage,
@@ -25,6 +35,20 @@ from scagent_sdk.runtime.protocol import (
 MAX_RUNTIME_MESSAGE_BYTES = 64 * 1024 * 1024
 DEFAULT_OUTPUT_RESERVE_TOKENS = 32_000
 MIN_CONTEXT_SAFETY_MARGIN_TOKENS = 4_096
+# Conservative allowance for the MCP tool schemas the CLI injects alongside the system prompt.
+# The calibration ratchet corrects any residual drift, so a rough constant is sufficient.
+DEFAULT_TOOL_SCHEMA_OVERHEAD_TOKENS = 8_000
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
 
 
 @dataclass(frozen=True)
@@ -66,7 +90,9 @@ class ClaudeAgentSDKBackend:
         self.extensions = extensions or ClaudeRuntimeExtensions()
         self.observer = observer or NullRuntimeObserver()
         self._client: Any | None = None
+        self._transcript_store: ScientificSessionTranscriptStore | None = None
         self._interrupt_requested = False
+        self._context_rollover_requested: ContextRolloverRequired | None = None
         # Last runtime session ID seen on the wire. A turn stopped before its ResultMessage
         # still has a resumable model conversation; keeping the ID is what preserves exact
         # resume instead of silently downgrading the next turn to a reconstructed one.
@@ -88,12 +114,46 @@ class ClaudeAgentSDKBackend:
             return
         sys.stderr.write(line if line.endswith("\n") else line + "\n")
 
+    @staticmethod
+    def _compaction_config(request: RuntimeRequest, system_prompt: str) -> CompactionConfig:
+        """Budget the replayed transcript against the model window, minus fixed overhead.
+
+        Disabled (a pure no-op) when the context window is unknown or when
+        ``SCAGENT_COMPACTION_DISABLED`` is set, in which case the existing preflight/rollover
+        path remains the sole backstop. Image/tail knobs are env-overridable so the policy can
+        follow the model in use without a code change.
+        """
+
+        disabled = os.environ.get("SCAGENT_COMPACTION_DISABLED", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+        overhead = len(system_prompt) // CHARS_PER_TOKEN + DEFAULT_TOOL_SCHEMA_OVERHEAD_TOKENS
+        return CompactionConfig(
+            context_limit=request.context_window_tokens,
+            output_reserve=request.max_output_tokens or DEFAULT_OUTPUT_RESERVE_TOKENS,
+            overhead_tokens=overhead,
+            image_token_estimate=_env_int(
+                "SCAGENT_IMAGE_TOKEN_ESTIMATE", DEFAULT_IMAGE_TOKEN_ESTIMATE
+            ),
+            keep_tail_entries=_env_int("SCAGENT_KEEP_TAIL_ENTRIES", DEFAULT_KEEP_TAIL_ENTRIES),
+            max_context_images=_env_int(
+                "SCAGENT_MAX_CONTEXT_IMAGES", DEFAULT_MAX_CONTEXT_IMAGES
+            ),
+            enabled=not disabled,
+        )
+
     def _options(self, request: RuntimeRequest, sdk: Any) -> Any:
         profile = request.profile
         extensions = self.extensions
         system_prompt = profile.read_system_prompt()
         if extensions.system_prompt_suffix.strip():
             system_prompt = f"{system_prompt}\n\n{extensions.system_prompt_suffix.strip()}"
+        self._transcript_store = ScientificSessionTranscriptStore(
+            request.scientific_session_dir,
+            compaction=self._compaction_config(request, system_prompt),
+        )
         values: dict[str, Any] = {
             "model": profile.model,
             "system_prompt": system_prompt,
@@ -116,8 +176,12 @@ class ClaudeAgentSDKBackend:
             "env": profile.runtime_environment(),
             "resume": request.resume_session_id,
             "fork_session": request.fork_session,
-            "session_store": ScientificSessionTranscriptStore(request.scientific_session_dir),
-            "session_store_flush": "batched",
+            "session_store": self._transcript_store,
+            # Tool results mutate the durable scientific session before they are returned to the
+            # model. Mirror each runtime frame eagerly as well, so a context rollover at that
+            # committed boundary never depends on a later terminal ResultMessage to preserve the
+            # conversation prefix.
+            "session_store_flush": "eager",
             "stderr": self._sdk_stderr,
             # Scientific turns carry figure pixels back to the model. The SDK's default 1 MiB
             # stdout frame limit is a transport detail that a few normal-sized plots exceed, and
@@ -172,6 +236,19 @@ class ClaudeAgentSDKBackend:
         with suppress(Exception):
             await client.interrupt()
         return True
+
+    @staticmethod
+    def _contains_tool_result(message: Any, sdk: Any) -> bool:
+        """Return whether a user-side runtime frame completed a tool invocation."""
+
+        content = getattr(message, "content", None)
+        blocks = content if isinstance(content, list) else [content]
+        for block in blocks:
+            if isinstance(block, getattr(sdk, "ToolResultBlock", ())):
+                return True
+            if isinstance(block, dict) and block.get("type") == "tool_result":
+                return True
+        return False
 
     def _note_session_id(self, message: Any) -> None:
         session_id = getattr(message, "session_id", None)
@@ -299,6 +376,88 @@ class ClaudeAgentSDKBackend:
             ),
         }
 
+    @staticmethod
+    def _rollover_for_usage(
+        usage: Mapping[str, Any], request: RuntimeRequest
+    ) -> ContextRolloverRequired | None:
+        total = usage.get("total_tokens")
+        limit = usage.get("context_window_tokens")
+        if (
+            not isinstance(total, int)
+            or isinstance(total, bool)
+            or total < 0
+            or not isinstance(limit, int)
+            or isinstance(limit, bool)
+            or limit < 1
+        ):
+            return None
+        output_reserve = request.max_output_tokens or DEFAULT_OUTPUT_RESERVE_TOKENS
+        safety_margin = max(MIN_CONTEXT_SAFETY_MARGIN_TOKENS, int(limit * 0.03))
+        if total + output_reserve + safety_margin < limit:
+            return None
+        return ContextRolloverRequired(
+            "the live model conversation reached its context reserve after a committed "
+            "scientific tool result "
+            f"({total:,} used + {output_reserve:,} output reserve + "
+            f"{safety_margin:,} safety margin >= {limit:,} token window)",
+            total_tokens=total,
+            context_window_tokens=limit,
+            output_reserve_tokens=output_reserve,
+            safety_margin_tokens=safety_margin,
+            source=str(usage.get("context_window_source") or usage.get("source") or "runtime"),
+        )
+
+    @staticmethod
+    def _compaction_summary(stats: CompactionStats) -> str:
+        parts: list[str] = []
+        if stats.images_evicted:
+            parts.append(f"{stats.images_evicted} figure(s) aged out")
+        if stats.results_trimmed:
+            parts.append(f"{stats.results_trimmed} result(s) trimmed")
+        if stats.args_trimmed:
+            parts.append(f"{stats.args_trimmed} tool input(s) trimmed")
+        if stats.assistant_truncated:
+            parts.append(f"{stats.assistant_truncated} note(s) shortened")
+        summary = ", ".join(parts) or "history trimmed"
+        return f"emergency compaction — {summary}" if stats.emergency else summary
+
+    def _report_compaction(self) -> None:
+        store = self._transcript_store
+        if store is None:
+            return
+        stats = store.take_last_compaction()
+        if stats is None or not stats.triggered:
+            return
+        self.observer.on_context_compacted(
+            summary=self._compaction_summary(stats),
+            tokens_before=stats.tokens_before,
+            tokens_after=stats.tokens_after,
+        )
+
+    @staticmethod
+    def _prompt_tokens(usage: Any) -> int | None:
+        if not isinstance(usage, dict):
+            return None
+        total = 0
+        for key in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"):
+            value = usage.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                total += value
+        if total:
+            return total
+        prompt = usage.get("prompt_tokens")
+        if isinstance(prompt, int) and not isinstance(prompt, bool) and prompt > 0:
+            return prompt
+        return None
+
+    def _calibrate_estimator(self, result: Any | None) -> None:
+        store = self._transcript_store
+        if store is None or result is None:
+            return
+        actual = self._prompt_tokens(getattr(result, "usage", None))
+        with suppress(Exception):
+            store.update_calibration(actual)
+
     async def execute(self, request: RuntimeRequest) -> RuntimeResponse:
         sdk = self._sdk()
         options = self._options(request, sdk)
@@ -306,6 +465,7 @@ class ClaudeAgentSDKBackend:
         result: Any | None = None
         context_usage: dict[str, Any] = {}
         self._interrupt_requested = False
+        self._context_rollover_requested = None
         self.last_runtime_session_id = request.resume_session_id
         self.observer.on_runtime_started(request)
         try:
@@ -313,6 +473,7 @@ class ClaudeAgentSDKBackend:
                 self._client = client
                 await self._preflight_context(client, request)
                 await client.query(request.prompt)
+                self._report_compaction()
                 async for message in client.receive_response():
                     self._note_session_id(message)
                     if isinstance(message, sdk.AssistantMessage):
@@ -322,6 +483,18 @@ class ClaudeAgentSDKBackend:
                             self.observer.on_message(block)
                     elif isinstance(message, sdk.ResultMessage):
                         result = message
+                    elif isinstance(message, getattr(sdk, "UserMessage", ())):
+                        # PostToolUse has already validated and committed the state patch by the
+                        # time this frame arrives. This is the safe live-compaction boundary: stop
+                        # the replaceable model conversation, then let the service reconstruct it
+                        # from the authoritative scientific session and continue the same turn.
+                        if self._contains_tool_result(message, sdk):
+                            context_usage = await self._current_context_usage(client, request)
+                            rollover = self._rollover_for_usage(context_usage, request)
+                            if rollover is not None:
+                                self._context_rollover_requested = rollover
+                                with suppress(Exception):
+                                    await client.interrupt()
                 context_usage = await self._current_context_usage(client, request)
         except asyncio.CancelledError:
             self.observer.on_runtime_interrupted(forced=True)
@@ -329,6 +502,8 @@ class ClaudeAgentSDKBackend:
         except RuntimeExecutionError:
             raise
         except Exception as exc:
+            if self._context_rollover_requested is not None:
+                raise self._context_rollover_requested from exc
             if self._interrupt_requested:
                 # The runtime tore itself down while stopping. That is the interrupt landing,
                 # not a scientific failure.
@@ -339,9 +514,12 @@ class ClaudeAgentSDKBackend:
         finally:
             self._client = None
 
+        if self._context_rollover_requested is not None:
+            raise self._context_rollover_requested
         if self._interrupt_requested:
             self.observer.on_runtime_interrupted(forced=False)
             return self._interrupted_response(messages, result)
+        self._calibrate_estimator(result)
         if result is None:
             raise RuntimeExecutionError("Claude Agent SDK ended without a ResultMessage")
         if not isinstance(result.session_id, str) or not result.session_id:

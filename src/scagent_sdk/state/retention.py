@@ -277,6 +277,16 @@ def propose_prune(
     live = reachable_from_heads(lineage, [head] if head else [])
     root = Path(session_dir)
 
+    def artifact_directory(execution_id: str) -> Path:
+        # Committed artifact directories are named ``<action>--<execution_id>``, so the ID alone no
+        # longer reconstructs the path. Trust the directory recorded on the artifact record; fall
+        # back to the legacy bare name for sessions written before descriptive naming.
+        record = artifacts.get(execution_id)
+        recorded = record.get("path") if isinstance(record, Mapping) else None
+        if isinstance(recorded, str) and recorded:
+            return root / recorded
+        return root / "artifacts" / "capabilities" / execution_id
+
     defects = topology_defects(lineage)
     topology_reliable = not defects
 
@@ -300,7 +310,7 @@ def propose_prune(
         node = nodes[execution_id]
         if not isinstance(node, Mapping):
             continue
-        directory = root / "artifacts" / "capabilities" / execution_id
+        directory = artifact_directory(execution_id)
         if execution_id in live:
             retained_paths.append(directory)
             retained_ids.append(execution_id)
@@ -309,7 +319,7 @@ def propose_prune(
         node = nodes[execution_id]
         if not isinstance(node, Mapping) or execution_id in live:
             continue
-        directory = root / "artifacts" / "capabilities" / execution_id
+        directory = artifact_directory(execution_id)
         created = node.get("created_by")
         tool = created.get("tool_name") if isinstance(created, Mapping) else None
         candidates.append(
@@ -335,12 +345,12 @@ def propose_prune(
         )
 
     every_artifact = [
-        root / "artifacts" / "capabilities" / execution_id
+        artifact_directory(execution_id)
         for execution_id in sorted(artifacts)
         if isinstance(artifacts.get(execution_id), Mapping)
     ]
     candidate_total = account(
-        [root / "artifacts" / "capabilities" / item.execution_id for item in candidates],
+        [artifact_directory(item.execution_id) for item in candidates],
         retained=retained_paths,
     )
     if candidate_total.apparent_bytes and not candidate_total.reclaimable_bytes:

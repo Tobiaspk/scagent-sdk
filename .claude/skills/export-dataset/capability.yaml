@@ -1,0 +1,27 @@
+schema_version: 1
+
+skill:
+  id: export-dataset
+  version: "0.1.0"
+  description: Portable, provenance-bearing AnnData delivery without scientific mutation.
+
+tools:
+  - name: export_anndata
+    description: Export an existing H5AD or Zarr AnnData artifact as a compressed, round-trip-verified H5AD data deliverable while preserving its full contents. This is format-only and does not advance the analysis head.
+    entrypoint: scripts/export.py:run
+    environment: anndata-io
+    activity_label: Exporting AnnData as H5AD
+    input_schema:
+      type: object
+      additionalProperties: false
+      properties:
+        path:
+          type: string
+          description: H5AD or Zarr analysis artifact to export; omit to use the active analysis artifact.
+        filename:
+          type: string
+          minLength: 6
+          description: Optional portable filename ending in .h5ad. Directory components are not allowed.
+    primary_matrix_input: path
+    primary_matrix_output: portable-anndata
+    advances_lineage: false

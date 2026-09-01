@@ -20,6 +20,23 @@ _SYMBOL_COLUMNS = (
 )
 
 
+def _read_matrix(path):
+    """Read an AnnData artifact, tolerating both .h5ad files and .zarr stores (ADR 0011)."""
+    import anndata as ad
+
+    return ad.read_zarr(path) if str(path).endswith(".zarr") else ad.read_h5ad(path)
+
+
+def _write_matrix(adata, path):
+    """Write an AnnData artifact: a .zarr store (blosc) or a gzipped .h5ad file (ADR 0011)."""
+    import anndata as ad
+
+    if str(path).endswith(".zarr"):
+        ad.settings.zarr_write_format = 2  # v2 until the v3 sharding/dedup design lands
+        adata.write_zarr(path)
+    else:
+        adata.write_h5ad(path, compression="gzip")
+
 def _identity(kind: str, value: Any) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()
     return f"{kind}:sha256:{hashlib.sha256(encoded).hexdigest()}"
@@ -79,9 +96,9 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     from celltypist import models
 
     path = Path(str(arguments["path"])).expanduser().resolve()
-    if not path.is_file():
+    if not path.exists():
         raise FileNotFoundError(path)
-    model = str(arguments.get("model", "Immune_All_Low.pkl"))
+    model = str(arguments["model"])
     counts_arg = arguments.get("counts_layer", "counts")
     counts_layer = str(counts_arg) if counts_arg is not None else None
     output_key = str(arguments.get("output_key", "celltypist_prediction"))
@@ -93,7 +110,7 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
             f"CellTypist model is not cached: {model_path}. Choose a local model; "
             "downloads are not implicit."
         )
-    adata = sc.read_h5ad(path)
+    adata = _read_matrix(path)
     counts, count_source = _select_counts(adata, counts_layer)
     _validate_counts(counts, label=count_source)
     ct_model = models.Model.load(str(model_path))
@@ -143,9 +160,9 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
         }
     )
     adata.uns["scagent_sdk"] = metadata
-    output_name = "celltypist-annotated.h5ad"
-    final_path = f"artifacts/capabilities/{context.execution_id}/{output_name}"
-    adata.write_h5ad(context.staging_dir / output_name, compression="gzip")
+    output_name = "celltypist-annotated.zarr"
+    final_path = f"{context.artifact_relative_path}/{output_name}"
+    _write_matrix(adata, context.staging_dir / output_name)
     cell_table = pd.DataFrame(
         {
             "cell": adata.obs_names.astype(str),
@@ -194,7 +211,7 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
             {
                 "name": "celltypist-annotated-anndata",
                 "relative_path": output_name,
-                "media_type": "application/x-hdf5",
+                "media_type": "application/vnd.zarr",
             },
             {
                 "name": "celltypist-cell-predictions",
@@ -213,17 +230,16 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
 def summarize_by_cluster(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     import numpy as np
     import pandas as pd
-    import scanpy as sc
 
     path = Path(str(arguments["path"])).expanduser().resolve()
-    if not path.is_file():
+    if not path.exists():
         raise FileNotFoundError(path)
     cluster_key = str(arguments["cluster_key"])
     prediction_key = str(arguments.get("prediction_key", "celltypist_prediction"))
     confidence_key = str(
         arguments.get("confidence_key", "celltypist_prediction_confidence")
     )
-    adata = sc.read_h5ad(path)
+    adata = _read_matrix(path)
     for key in (cluster_key, prediction_key, confidence_key):
         if key not in adata.obs:
             raise ValueError(f"obs key {key!r} is absent")
@@ -304,7 +320,7 @@ def summarize_by_cluster(arguments: dict[str, Any], context: Any) -> dict[str, A
                         "prediction_key": prediction_key,
                         "cluster_predictions": predictions,
                         "artifact_path": (
-                            f"artifacts/capabilities/{context.execution_id}/"
+                            f"{context.artifact_relative_path}/"
                             "celltypist-cluster-predictions.csv"
                         ),
                     }

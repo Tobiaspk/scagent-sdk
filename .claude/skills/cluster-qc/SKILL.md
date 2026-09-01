@@ -20,7 +20,8 @@ separation evidence. It evaluates three independent axes per cluster and synthes
 A cluster can be auto-removed **only** when metric QC is adverse, its DEGs are junk, and its covariance
 is unstructured/weak — and the total removal stays below `auto_remove_max_fraction`. A missing or
 inconclusive axis never counts as agreement; conflicts (`junk_markers_but_structured`,
-`identity_without_structure`, `conflicting`, `inconclusive`) are flagged for review and kept. Set
+`conflicting`, `inconclusive`) are flagged for review and kept. An identity-supported cluster with
+weak covariance is kept: weak structure alone is common and is not a defect. Set
 `auto_remove_convergent=false` is the default inspect/report-only behavior. Set it true explicitly
 only when mutation is intended.
 
@@ -34,19 +35,25 @@ metric-flagged clusters in red), a cluster/QC UMAP, a per-cluster highlight grid
 covariance heatmap for every eligible cluster. Inspect all of them, including heatmaps not
 attached inline, then call `review_cluster_qc`. The highlight grid is where a per-cluster
 judgement is actually made: the overlaid UMAP cannot separate thirty-plus colors, so use the grid
-to see whether a flagged cluster is one coherent region or debris scattered across the embedding. The review must cover every returned visual artifact and every cluster marked
-for review. A `keep` rationale resolves a warning; remove/merge/split/recluster/defer remains an
-open action and blocks final publication until a new current clustering is evaluated.
+to see whether a flagged cluster is one coherent region or debris scattered across the embedding.
+Review the overview and drill into the specific clusters whose evidence is genuinely conflicting;
+per-cluster heatmaps are available on demand rather than a mandatory checklist. A review decision
+records the judgment but does not gate final publication.
 
 For a comprehensive end-to-end run, work down resolutions 2.0, 1.5, and 1.0 **iteratively, not side
-by side**. Each resolution is the next phase on the cells the previous round left behind, not a
+by side**, and give **every clustering you create its own QC round** — evaluate, inspect the
+figures, review, and ask at each rung whether a population now needs to be removed. Each resolution
+is the next phase on the cells the previous round left behind, not a
 competing candidate on the same cells: evaluate and review at 2.0, apply any confirmed removal,
 re-prepare the retained cells (normalize, re-select HVGs, PCA, neighbors, UMAP), then cluster and
 evaluate again at the next resolution with a distinct cluster key. The high resolution exists to
-expose small low-quality populations while they are still separable; 1.0 is the default annotation
-granularity. End the cleanup loop when a round flags nothing requiring removal, then descend to the
-annotation resolution and judge it on stability, coherence, identity DEGs, separation, and
-interpretability. This is guidance, not hardcoding: users and data can change the ladder.
+expose small low-quality populations while they are still separable; 1.5 is the round after a
+confirmed removal and the first re-clustering on an integrated embedding (integration reshuffles
+neighborhoods, so its clusters are re-adjudicated, not inherited); 1.0 is the default annotation
+granularity and gets a full QC round before DEGs or labels bind to it. A clean round ends the
+*removal loop* — stop hunting for more cells to cut — but it never waives QC on the later rungs:
+what was invisible inside a healthy neighbour at one granularity, or before correction, can be
+separable at the next. This is guidance, not hardcoding: users and data can change the ladder.
 
 When a removal is applied, the capability issues fresh dataset/cell-set/count identities from
 preserved raw counts and invalidates downstream evidence: re-prepare, recluster, and re-run this

@@ -39,32 +39,30 @@ explicitly confirmed cell-set mutation that requires complete downstream reproce
 
 Treat resolution as a scientific parameter. Compare stability, marker coherence, and interpretability rather than choosing the largest cluster count. Reclustering creates a new identity and makes prior cluster QC and annotation evidence stale.
 
-For an ordinary end-to-end run, descend **2.0 → 1.5 → 1.0** by default, iteratively rather than
-side by side. These are not three candidate answers to the same question. They are successive
-phases, each clustering the cells the previous phase left behind: 2.0 exposes small low-quality
-populations while they are still separable, the middle rungs are the working granularity once
-obvious junk is gone, and 1.0 is the default annotation granularity. Use a distinct observation key
-per round.
+For an ordinary end-to-end run, use **2.0 once for exploratory cleanup** and **1.0 once for final
+annotation**. Resolution 1.5 is an evidence-triggered refinement when a real merge/split ambiguity
+remains, not a mandatory intermediate phase. Use a distinct observation key per round.
 
-One round is: cluster → `evaluate_cluster_qc` (report-only) → inspect the metric boxplots,
-cluster/QC UMAP, highlight grid, and every covariance heatmap → `review_cluster_qc` → apply any
+One round is: cluster → `evaluate_cluster_qc` (report-only) → inspect the attached metric boxplots,
+cluster/QC UMAP, and highlight grid, then use the evidence table and selectively open a covariance
+heatmap for any ambiguous cluster → `review_cluster_qc` → apply any
 confirmed removal with `auto_remove_convergent=true` → re-prepare the retained cells. Re-preparation
 must recompute HVGs, not reuse them: subsetting cells changes the variance landscape, and the
 embedding the next round clusters on has to reflect the cleaned population. A cleanup also clears
 cell-QC and doublet evidence, so both are re-established before the next round is interpreted.
 
-End the cleanup loop when a round flags nothing requiring removal, then descend to the annotation
-resolution and make that clustering active so downstream identities bind to it. Annotate at 1.0
-unless the evidence shows genuine over- or under-splitting and you say so explicitly. This ladder
-is a skill default, not a hardcoded pipeline: the user can override it, and the data can justify
-additional, narrower, or lower resolutions.
+End the cleanup loop as soon as a round flags nothing requiring removal. Investigate and decide
+batch handling on that clean exploratory representation before paying for another clustering/QC
+round. Then create the annotation clustering at 1.0 (from the integrated representation if the
+recorded batch decision selected integration) unless the evidence shows genuine over- or
+under-splitting and you say so explicitly.
 
 Each clustering step continues from the artifact the analysis is currently on, so omit the dataset
 path and let the runtime supply it. A transforming tool refuses a superseded artifact, because
 continuing from one silently discards whatever the intervening steps added.
 
-That makes the descent above the default shape: cluster, read the evidence, clean up, cluster again
-from the result. When a comparison genuinely needs two clusterings of the *same* embedding side by
+That makes the cleanup loop's shape: cluster, read the evidence, clean up only when warranted, then
+rebuild and repeat. When a comparison genuinely needs two clusterings of the *same* embedding side by
 side, pass `branch_from` with the version to fork from; each alternative is recorded without
 changing which version is active. The full or short version ID reported by `analysis-versions` is
 accepted directly. Use `analysis-versions` to list them and to switch to the one the

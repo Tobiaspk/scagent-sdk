@@ -1,11 +1,11 @@
 schema_version: 1
 skill:
   id: dimensionality-reduction
-  version: "0.1.0"
+  version: "0.2.0"
   description: Independent PCA, neighbor-graph, and UMAP transformations.
 tools:
   - name: compute_single_cell_pca
-    description: Compute PCA from the current expression matrix, optionally using an existing highly-variable-gene mask.
+    description: Compute PCA on the GPU with RAPIDS SingleCell, optionally using an existing highly-variable-gene mask.
     entrypoint: scripts/reduce.py:compute_pca
     environment: gpu-singlecell
     activity_label: Computing PCA
@@ -21,7 +21,7 @@ tools:
     primary_matrix_input: path
     primary_matrix_output: pca-anndata
   - name: build_single_cell_neighbors
-    description: Build a nearest-neighbor graph from an explicitly named representation such as X_pca, X_scVI, or X_scimilarity.
+    description: Build a GPU nearest-neighbor graph with RAPIDS SingleCell from an explicitly named representation such as X_pca, X_scVI, or X_scimilarity.
     entrypoint: scripts/reduce.py:build_neighbors
     environment: gpu-singlecell
     activity_label: Building neighbors
@@ -39,7 +39,7 @@ tools:
     primary_matrix_input: path
     primary_matrix_output: neighbors-anndata
   - name: compute_single_cell_umap
-    description: Compute a UMAP visualization from an existing neighbor graph.
+    description: Compute a GPU UMAP visualization with RAPIDS SingleCell from an existing neighbor graph.
     entrypoint: scripts/reduce.py:compute_umap
     environment: gpu-singlecell
     activity_label: Computing UMAP

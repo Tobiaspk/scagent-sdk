@@ -7,6 +7,7 @@ from pathlib import Path
 
 from scagent_sdk.capabilities.executor import CapabilityExecutor
 from scagent_sdk.capabilities.registry import CapabilityRegistry
+from scagent_sdk.capabilities.results import capability_artifact_directory_name
 from scagent_sdk.session import AnalysisSession
 
 
@@ -31,7 +32,8 @@ def test_capability_result_is_staged_then_committed_by_hook(tmp_path: Path) -> N
     execution_id = envelope["scagent_execution_id"]
     assert envelope["status"] == "validated"
     assert envelope["state_commit"] == "PostToolUse"
-    assert envelope["artifact_relative_path"] == f"artifacts/capabilities/{execution_id}"
+    expected_dir = capability_artifact_directory_name(tool.name, execution_id)
+    assert envelope["artifact_relative_path"] == f"artifacts/capabilities/{expected_dir}"
     assert envelope["artifact_path"] == str(
         (session.directory / envelope["artifact_relative_path"]).resolve()
     )
@@ -49,6 +51,9 @@ def test_capability_result_is_staged_then_committed_by_hook(tmp_path: Path) -> N
     assert (session.directory / artifact["path"] / "inspection.json").is_file()
     kinds = [event.kind for event in session.store.events()]
     assert kinds[-2:] == ["capability.result_staged", "capability.result_committed"]
+    assert executor.recover_pending() == []
+    assert (session.directory / artifact["path"] / "inspection.json").is_file()
+    assert not executor.quarantine_root.exists()
 
 
 def test_session_relative_artifact_path_is_resolved_for_the_next_tool(
@@ -126,7 +131,7 @@ tools:
     assert (executor.pending_root / execution_id / "details.json").is_file()
 
     pending = executor.pending_root / execution_id
-    final = executor.artifact_root / execution_id
+    final = session.directory / response["structuredContent"]["artifact_relative_path"]
     final.parent.mkdir(parents=True, exist_ok=True)
     pending.rename(final)
     assert executor.recover_pending() == [execution_id]
@@ -156,15 +161,18 @@ def test_executor_enforces_scientific_floors_without_sdk_hook(tmp_path: Path) ->
     package = next(
         item
         for item in CapabilityRegistry(skills_root).discover()
-        if item.manifest.skill_id == "finalize-analysis"
+        if item.manifest.skill_id == "cellbender-background-removal"
+    )
+    tool = next(
+        item for item in package.manifest.tools if item.name == "remove_ambient_background"
     )
     session = AnalysisSession.create(tmp_path / "sessions", title="defense in depth")
 
     response = asyncio.run(
         CapabilityExecutor(session).execute(
             package,
-            package.manifest.tools[0],
-            {"path": str(tmp_path / "unmaterialized.h5ad")},
+            tool,
+            {"path": str(tmp_path / "raw_feature_bc_matrix.h5")},
         )
     )
 
@@ -173,8 +181,94 @@ def test_executor_enforces_scientific_floors_without_sdk_hook(tmp_path: Path) ->
     assert "scientific floor denied execution" in response["content"][0]["text"]
     # ...but the terminal gets a single concise line.
     summary = response["error_summary"]
-    assert summary.startswith("finalize_analysis failed:")
+    assert summary.startswith("remove_ambient_background failed:")
     assert "\n" not in summary
+
+
+def test_store_directory_artifact_is_sized_by_tree_and_committed_intact(tmp_path: Path) -> None:
+    # A .zarr store is one artifact that is a directory, not a single file. The executor must
+    # accept it, record its size as the sum of member files, and commit the whole tree intact.
+    skill = tmp_path / "skills" / "storer"
+    (skill / "scripts").mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\nname: storer\ndescription: writes a store\n---\n", encoding="utf-8"
+    )
+    (skill / "capability.yaml").write_text(
+        """\
+schema_version: 1
+skill: {id: storer, version: "1", description: test}
+tools:
+  - name: write_store
+    description: write a zarr-like store directory
+    entrypoint: scripts/run.py:run
+    input_schema: {type: object}
+    primary_matrix_output: matrix
+""",
+        encoding="utf-8",
+    )
+    (skill / "scripts" / "run.py").write_text(
+        "def run(arguments, context):\n"
+        "    store = context.staging_dir / 'matrix.zarr'\n"
+        "    (store / 'X').mkdir(parents=True)\n"
+        "    (store / '.zgroup').write_bytes(b'0123456789')\n"      # 10 bytes
+        "    (store / 'X' / '0.0').write_bytes(b'x' * 100)\n"       # 100 bytes
+        "    return {'summary': 'wrote a store',\n"
+        "            'details': {}, 'facts_patch': {},\n"
+        "            'artifacts': [{'name': 'matrix',\n"
+        "                           'relative_path': 'matrix.zarr',\n"
+        "                           'media_type': 'application/octet-stream'}]}\n",
+        encoding="utf-8",
+    )
+    package = CapabilityRegistry(skill.parent).discover()[0]
+    session = AnalysisSession.create(tmp_path / "sessions", title="store")
+    executor = CapabilityExecutor(session)
+
+    response = asyncio.run(executor.execute(package, package.manifest.tools[0], {}))
+    envelope = response["structuredContent"]
+    assert envelope["status"] == "validated"
+    produced = envelope["files"][0]
+    assert produced["relative_path"] == "matrix.zarr"
+    assert produced["size_bytes"] == 110  # summed over the tree, not a single stat()
+
+    assert executor.commit_from_hook({"tool_response": response}) is True
+    artifact = session.store.state.artifacts[envelope["scagent_execution_id"]]
+    store = session.directory / artifact["path"] / "matrix.zarr"
+    assert (store / ".zgroup").read_bytes() == b"0123456789"
+    assert (store / "X" / "0.0").stat().st_size == 100
+
+
+def test_dedup_hard_links_only_byte_identical_files(tmp_path: Path) -> None:
+    session = AnalysisSession.create(tmp_path / "sessions", title="dedup")
+    executor = CapabilityExecutor(session)
+    parent = executor.artifact_root / "P"
+    child = executor.artifact_root / "C"
+    # Different store-dir names (pca.zarr vs neighbors.zarr) with identical inner files: content
+    # matching must dedup these; path matching (the earlier bug) would miss them entirely.
+    (parent / "pca.zarr" / "X").mkdir(parents=True)
+    (child / "neighbors.zarr" / "X").mkdir(parents=True)
+    chunk = b"chunk" * 100
+    (parent / "pca.zarr" / "X" / "0.0").write_bytes(chunk)  # identical to child -> linked
+    (child / "neighbors.zarr" / "X" / "0.0").write_bytes(chunk)
+    (parent / "same").write_bytes(b"abc")  # identical -> linked
+    (child / "same").write_bytes(b"abc")
+    (parent / "diff").write_bytes(b"aaa")  # differs -> left as its own copy
+    (child / "diff").write_bytes(b"bbb")
+    (child / "only-child").write_bytes(b"z")  # no parent counterpart -> untouched
+
+    linked, freed = executor._dedup_against_parent("C", "P")
+
+    child_chunk = child / "neighbors.zarr" / "X" / "0.0"
+    parent_chunk = parent / "pca.zarr" / "X" / "0.0"
+    assert linked == 2
+    assert freed == len(chunk) + len(b"abc")
+    assert child_chunk.stat().st_ino == parent_chunk.stat().st_ino  # linked across store names
+    assert (child / "same").stat().st_ino == (parent / "same").stat().st_ino
+    assert (child / "diff").stat().st_ino != (parent / "diff").stat().st_ino
+    assert (child / "diff").read_bytes() == b"bbb"  # differing file untouched
+    assert child_chunk.read_bytes() == chunk  # linked content intact
+    # idempotent, and a missing parent is a no-op
+    assert executor._dedup_against_parent("C", "P") == (0, 0)
+    assert executor._dedup_against_parent("C", None) == (0, 0)
 
 
 def test_committed_python_code_is_mirrored_into_code_dir(tmp_path: Path) -> None:
@@ -219,3 +313,34 @@ tools:
     assert mirrored[0].name.startswith("inspect-the-reyfman-dataset-")
     assert mirrored[0].is_symlink()
     assert mirrored[0].read_text() == "print(1)\n"
+
+
+def test_bounded_model_image_downscales_oversized_figures_instead_of_failing() -> None:
+    """Regression: an over-budget figure must be downscaled to fit, not discarded. Previously the
+    executor raised "model_media exceeds ... bytes" and threw away the whole capability result."""
+
+    import io
+
+    from PIL import Image
+
+    from scagent_sdk.capabilities.executor import _bounded_model_image
+
+    # A small PNG passes through untouched.
+    tiny = io.BytesIO()
+    Image.new("RGB", (8, 8), "white").save(tiny, format="PNG")
+    data, mime = _bounded_model_image(tiny.getvalue(), "image/png", 2 * 1024 * 1024)
+    assert data == tiny.getvalue()
+    assert mime == "image/png"
+
+    # A high-entropy PNG well over a tight budget is re-encoded under it.
+    import random
+
+    rng = random.Random(0)
+    noise = bytes(rng.getrandbits(8) for _ in range(3 * 2000 * 2000))
+    big = io.BytesIO()
+    Image.frombytes("RGB", (2000, 2000), noise).save(big, format="PNG")
+    limit = 256 * 1024
+    assert big.tell() > limit
+    bounded, bmime = _bounded_model_image(big.getvalue(), "image/png", limit)
+    assert len(bounded) <= limit
+    assert bmime in {"image/png", "image/jpeg"}

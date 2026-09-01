@@ -79,6 +79,10 @@ This is the stage that closes the original defect.
   measured reasons: CellBender emits three `.h5` matrices of which only the filtered one continues
   the analysis, and cluster QC writes a matrix only when it removes clusters. A tool producing an
   undeclared AnnData **fails closed**.
+- A later delivery extension allows a declared matrix output to set `advances_lineage: false`.
+  Format-only exports retain source/output provenance but create no node, do not move the head,
+  accept an explicitly selected ancestor like a read-only consumer, and may not patch node-scoped
+  scientific facts.
 - `path` removed from `input_schema.required` across the 20 manifests that had it. The manifest
   rejects declaring a matrix input that is still required.
 - Omitted input → the executor injects the active artifact and reports `resolved_input`

@@ -192,6 +192,15 @@ class ModelLimitResolver:
         if context is None:
             return None
         advertised = item.get("id") or item.get("model_name") or item.get("model")
+        # Prefer the concrete upstream checkpoint over the routing alias: LiteLLM's
+        # /model/info reports the alias as `model_name` but carries the real model in
+        # litellm_params.model (e.g. "openai/Qwen3.8-27B"). Strip the "provider/" prefix
+        # so it reads like the raw id an OpenAI /models endpoint advertises.
+        params = item.get("litellm_params")
+        if isinstance(params, dict):
+            concrete = params.get("model")
+            if isinstance(concrete, str) and concrete:
+                advertised = concrete.split("/", 1)[-1] if "/" in concrete else concrete
         return ModelLimits(
             context_window_tokens=context,
             max_output_tokens=output,

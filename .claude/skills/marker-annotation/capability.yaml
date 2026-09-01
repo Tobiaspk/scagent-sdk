@@ -1,7 +1,7 @@
 schema_version: 1
 skill:
   id: marker-annotation
-  version: "0.4.0"
+  version: "0.5.0"
   description: Transparent cluster DEG/marker evidence and evidence-bound annotation review.
 tools:
   - name: evaluate_marker_evidence
@@ -32,7 +32,7 @@ tools:
       additionalProperties: false
     primary_matrix_input: path
   - name: review_annotation_evidence
-    description: Record DEG-primary adjudication after inspecting current DEG and reference evidence, requiring two independent references when available or a documented waiver.
+    description: Optionally record a concise review of any current annotation evidence. The tool can infer current method keys and preserves uncertain clusters as valid reviewed outcomes.
     entrypoint: scripts/markers.py:review_annotation_evidence
     environment: current
     activity_label: Reviewing annotation evidence
@@ -41,28 +41,31 @@ tools:
       properties:
         methods_reviewed:
           type: array
-          minItems: 2
           uniqueItems: true
+          default: []
+          description: Canonical current evidence keys. Omit to record all current methods.
           items: {type: string, minLength: 1}
         reviewed_artifacts:
           type: array
-          minItems: 1
           uniqueItems: true
+          default: []
           items: {type: string, minLength: 1}
         agreement_findings:
           type: array
-          minItems: 1
+          default: []
           items: {type: string, minLength: 1}
         unresolved_clusters:
           type: array
           uniqueItems: true
           default: []
           items: {type: string, minLength: 1}
+          description: Reviewed clusters whose identity remains uncertain; uncertainty does not make the review incomplete.
         reference_waiver:
           type: [string, "null"]
           default: null
-          description: Required when fewer than two independent reference methods are current.
-        rationale: {type: string, minLength: 1}
-      required: [methods_reviewed, reviewed_artifacts, agreement_findings,
-                 unresolved_clusters, rationale]
+          description: Optional note about unavailable or unsuitable reference methods.
+        rationale:
+          type: string
+          minLength: 1
+          default: Reviewed the current annotation evidence.
       additionalProperties: false

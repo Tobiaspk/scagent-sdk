@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from scagent_sdk.capabilities.manifest import CapabilityManifest
+from scagent_sdk.capabilities.manifest import CapabilityManifest, CapabilityTool
 from scagent_sdk.capabilities.registry import CapabilityRegistry
 from scagent_sdk.errors import CapabilityManifestError
 
@@ -26,6 +26,7 @@ def test_registry_discovers_and_loads_executable_project_skill() -> None:
         "doublet-evidence",
         "dimensionality-reduction",
         "expression-preprocessing",
+        "export-dataset",
         "finalize-analysis",
         "inspect-dataset",
         "inspect-media",
@@ -44,7 +45,7 @@ def test_registry_discovers_and_loads_executable_project_skill() -> None:
     assert tool.name == "inspect_dataset"
     assert callable(package.load_handler(tool))
     skills = CapabilityRegistry(root).skills()
-    assert len(skills) == 23
+    assert len(skills) == 24
     assert {skill.name for skill in skills if not skill.executable} == {"orchestrate-single-cell"}
 
 
@@ -56,7 +57,7 @@ def test_every_transforming_tool_exposes_the_executor_owned_adoption_control() -
         (package.manifest.skill_id, tool)
         for package in CapabilityRegistry(root).discover()
         for tool in package.manifest.tools
-        if tool.primary_matrix_output is not None
+        if tool.primary_matrix_output is not None and tool.advances_lineage
     ]
 
     assert len(transforming) == 20
@@ -71,6 +72,29 @@ def test_every_transforming_tool_exposes_the_executor_owned_adoption_control() -
         assert schema["type"] == "boolean"
         assert schema["default"] is False
         assert "adopt_untracked" not in tool.input_schema.get("required", [])
+
+    exporter = next(
+        tool
+        for package in CapabilityRegistry(root).discover()
+        if package.manifest.skill_id == "export-dataset"
+        for tool in package.manifest.tools
+    )
+    assert exporter.primary_matrix_output == "portable-anndata"
+    assert exporter.advances_lineage is False
+    assert "adopt_untracked" not in exporter.input_schema.get("properties", {})
+
+
+def test_manifest_rejects_non_advancing_tool_without_a_matrix_output() -> None:
+    with pytest.raises(CapabilityManifestError, match="requires primary_matrix_output"):
+        CapabilityTool.from_dict(
+            {
+                "name": "invalid_export",
+                "description": "invalid",
+                "entrypoint": "scripts/run.py:run",
+                "input_schema": {"type": "object"},
+                "advances_lineage": False,
+            }
+        )
 
 
 def test_manifest_rejects_escaping_entrypoint(tmp_path: Path) -> None:

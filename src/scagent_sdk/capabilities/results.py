@@ -11,18 +11,33 @@ from scagent_sdk.errors import CapabilityExecutionError
 
 RESULT_SCHEMA_VERSION = 1
 INLINE_RESULT_LIMIT_BYTES = 48 * 1024
-# A capability must be able to show the model every figure it just produced. A per-cluster
-# covariance pass legitimately renders one heatmap per cluster, and a count cap of 8 meant the
-# model was *required* to review figures it was never shown — it had to reopen them one at a
-# time after a floor blocked it, and wrote its review from recall rather than from pixels. The
-# byte budgets below are the limit that should bind: a full 28-cluster heatmap set measures
-# ~2.8 MiB, comfortably inside them. This ceiling only stops a runaway skill.
-MODEL_MEDIA_LIMIT = 64
+# Figures are model context, not merely transport bytes. Skills keep complete figure sets as
+# artifacts and attach only the compact views needed for the immediate decision; this ceiling is
+# a second line of defense against accidentally replaying dozens of images into one turn.
+MODEL_MEDIA_LIMIT = 8
 # Per-image and per-result byte budgets for pixels sent to the model. A downscaled preview is
 # far below these; the ceilings exist so one oversized figure cannot consume a turn's transport.
 MODEL_MEDIA_LIMIT_BYTES = 2 * 1024 * 1024
 MODEL_MEDIA_TOTAL_BYTES = 8 * 1024 * 1024
 MODEL_IMAGE_TYPES = frozenset({"image/png", "image/jpeg", "image/webp", "image/gif"})
+
+
+def capability_artifact_directory_name(tool_name: str, execution_id: str) -> str:
+    """Stable, readable canonical directory name for one capability execution.
+
+    The committed artifact directory is named ``<action>--<execution_id>`` so a session tree reads
+    as what each step did rather than as a wall of UUIDs. The execution ID is kept verbatim as the
+    suffix, so it remains recoverable from the directory name and every ``endswith("--<id>")`` check
+    that resolves an artifact by ID still matches. ``action`` is the tool name reduced to lowercase
+    alphanumerics with runs of other characters collapsed to a single ``-``.
+    """
+
+    action = "".join(
+        character if character.isalnum() else "-"
+        for character in tool_name.casefold()
+    )
+    action = "-".join(part for part in action.split("-") if part)
+    return f"{action or 'capability'}--{execution_id}"
 
 
 @dataclass(frozen=True)
@@ -38,6 +53,13 @@ class CapabilityContext:
     # Read-only view of the artifact lineage. Supplied so a tool can describe the available
     # versions or validate a switch target; only the executor ever mutates it.
     state_lineage: dict[str, Any] = field(default_factory=dict)
+    # The session-relative directory this execution's committed artifacts will live under, e.g.
+    # ``artifacts/capabilities/<action>--<execution_id>``. A skill that records a path to one of
+    # its own outputs into facts MUST build it from this prefix rather than re-deriving it from
+    # ``execution_id``: the committed directory is named for the action (see
+    # ``capability_artifact_directory_name``), so a hand-built ``artifacts/capabilities/<id>/…``
+    # path points at a directory that does not exist and every later resolve-by-path fails.
+    artifact_relative_path: str = ""
 
 
 @dataclass(frozen=True)
