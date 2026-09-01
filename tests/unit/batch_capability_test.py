@@ -33,7 +33,7 @@ def _g(name: str) -> Any:
 
 def test_manifest_splits_evidence_and_decision_tools() -> None:
     package = _package()
-    assert package.manifest.version == "0.8.0"
+    assert package.manifest.version == "0.9.0"
     names = {tool.name for tool in package.manifest.tools}
     assert names == {"investigate_batch", "decide_batch_handling"}
     evidence = next(t for t in package.manifest.tools if t.name == "investigate_batch")
@@ -47,9 +47,15 @@ def test_manifest_splits_evidence_and_decision_tools() -> None:
     assert evidence.primary_matrix_input == "path"
     assert evidence.primary_matrix_output is None  # reads a matrix, writes none
     props = evidence.input_schema["properties"]
-    assert set(props) == {"path", "batch_key", "cluster_key", "condition_keys"}
-    # Decision tool consumes an evidence id and is floored on current evidence.
-    assert decision.floors == ("current_batch_evidence",)
+    # No design/condition inputs: the caller cannot steer the verdict, only supply the matrix,
+    # the batch column, and the clustering.
+    assert set(props) == {
+        "path",
+        "batch_key",
+        "cluster_key",
+    }
+    # Decision tool consumes an evidence id and validates it intrinsically in the handler.
+    assert decision.floors == ()
     assert decision.entrypoint.endswith(":run_decision")
     assert set(decision.input_schema["properties"]["decision"]["enum"]) == {
         "keep_uncorrected",
@@ -172,41 +178,14 @@ def test_classify_gene_evidence_axis() -> None:
     assert classify(3, 2) == "recurring_sample_associated"
 
 
-def test_classify_design_axis_priority() -> None:
-    classify = _g("classify_design")
-    assert (
-        classify(
-            confounded_columns=["disease"],
-            has_orthogonal_condition=False,
-        )
-        == "confounded_with_biology"
-    )
-    assert (
-        classify(confounded_columns=[], has_orthogonal_condition=True)
-        == "orthogonal_but_not_known_technical"
-    )
-    assert (
-        classify(confounded_columns=[], has_orthogonal_condition=False)
-        == "unknown"
-    )
-
-
-def test_recommendation_matrix() -> None:
+def test_recommendation_is_gene_evidence_only() -> None:
+    # The recommendation depends ONLY on the gene evidence — there is no design axis to pass, so
+    # the caller can no longer steer it. Confirmed cross-sample split populations recommend
+    # integration; everything else keeps the uncorrected representation.
     recommend = _g("recommend")
-    assert recommend("none", "unknown") == "do_not_integrate_based_on_current_evidence"
-    assert recommend("localized", "unknown") == "do_not_integrate_based_on_current_evidence"
-    assert (
-        recommend("recurring_sample_associated", "unknown")
-        == "cannot_determine_technical_vs_biological"
-    )
-    assert (
-        recommend("recurring_sample_associated", "confounded_with_biology")
-        == "cannot_determine_technical_vs_biological"
-    )
-    assert (
-        recommend("recurring_sample_associated", "orthogonal_but_not_known_technical")
-        == "integration_optional_for_confirmed_replicates"
-    )
+    assert recommend("none") == "do_not_integrate_based_on_current_evidence"
+    assert recommend("localized") == "do_not_integrate_based_on_current_evidence"
+    assert recommend("recurring_sample_associated") == "integration_recommended"
 
 
 # --- compact decision state --------------------------------------------------
@@ -220,7 +199,7 @@ def test_compact_evidence_keeps_currency_and_artifact_pointer_only() -> None:
             "status": "complete",
             "evidence_id": "batch-evidence:e1",
             "batch_key": "donor",
-            "recommendation": "cannot_determine_technical_vs_biological",
+            "recommendation": "integration_recommended",
             "artifact_path": "artifacts/batch-evidence.json",
             "cell_set_id": "cells-a",
             "count_representation_id": "counts-a",
@@ -234,7 +213,7 @@ def test_compact_evidence_keeps_currency_and_artifact_pointer_only() -> None:
         "status": "complete",
         "evidence_id": "batch-evidence:e1",
         "batch_key": "donor",
-        "recommendation": "cannot_determine_technical_vs_biological",
+        "recommendation": "integration_recommended",
         "artifact_path": "artifacts/batch-evidence.json",
         "cell_set_id": "cells-a",
         "count_representation_id": "counts-a",
@@ -329,7 +308,7 @@ def test_concordance_reports_ari_nmi_and_flags_tracking() -> None:
     assert "well mixed" in mixed["interpretation"]
 
 
-def test_plain_interpretation_names_real_genes_and_defers_when_design_unknown() -> None:
+def test_plain_interpretation_names_real_genes_and_recommends_when_recurring() -> None:
     build = _g("build_plain_interpretation")
     text = build(
         batch_key="sample",
@@ -348,7 +327,7 @@ def test_plain_interpretation_names_real_genes_and_defers_when_design_unknown() 
         recurring_by_sample={"Donor_06": ["HLA-C", "XIST"]},
         gene_evidence="recurring_sample_associated",
         design_interpretation="unknown",
-        recommendation="cannot_determine_technical_vs_biological",
+        recommendation="integration_recommended",
         concordance={
             "ari": 0.51,
             "nmi": 0.68,
@@ -363,11 +342,12 @@ def test_plain_interpretation_names_real_genes_and_defers_when_design_unknown() 
     # Every gene named comes from the inputs; no disease/tissue is invented.
     assert "C1QB" in text and "CCL18" in text and "FOLR3" in text
     assert "tumor" not in text.lower() and "cancer" not in text.lower()
-    # The design-unknown branch defers rather than deciding, and the mixing caveat is present.
+    # The design is still stated as unknown (the caveat travels alongside), and the mixing caveat
+    # is present — but recurring evidence now RECOMMENDS integration rather than deferring.
     assert "no experimental-design information was provided" in text
-    assert "should not be integrated automatically" in text
+    assert "is recommended" in text
+    assert "only you can answer" in text
     assert "WHERE samples separate, never WHY" in text
-    assert "confirm whether these samples are meant to be comparable replicates" in text
 
 
 def test_plain_interpretation_localized_when_no_recurrence() -> None:
@@ -389,7 +369,7 @@ def test_plain_interpretation_localized_when_no_recurrence() -> None:
         recurring_by_sample={},
         gene_evidence="localized",
         design_interpretation="unknown",
-        recommendation="cannot_determine_technical_vs_biological",
+        recommendation="do_not_integrate_based_on_current_evidence",
         concordance={
             "ari": 0.1,
             "nmi": 0.1,
@@ -424,7 +404,7 @@ def test_terminal_summary_is_compact_legacy_shaped_and_stops_for_user_choice() -
         ],
         gene_evidence="recurring_sample_associated",
         design_interpretation="unknown",
-        recommendation="cannot_determine_technical_vs_biological",
+        recommendation="integration_recommended",
         concordance={"ari": 0.51, "nmi": 0.68},
         mixing={
             "status": "complete",
@@ -438,7 +418,14 @@ def test_terminal_summary_is_compact_legacy_shaped_and_stops_for_user_choice() -
     assert "C1QA" in text and "SOD2" in text
     assert "ARI 0.51, NMI 0.68" in text
     assert "strong-signature threshold" not in text
-    assert "Do not record a batch-handling decision until the user chooses" in text
+    # The pause is emphatic and self-deciding is called out as a bug; the tool never records.
+    assert "Do NOT call decide_batch_handling" in text
+    assert "END YOUR TURN now" in text
+    # The selector's last option is always "describe the experiment setup".
+    assert "describe the experiment setup so we can understand it better" in text
+    # Recurring gene evidence presents integration as the recommended default (legacy
+    # post-investigation checkpoint framing), while the user still makes the call.
+    assert "integrate with scVI as the recommended default" in text
     assert len(text) < 4_000
 
 

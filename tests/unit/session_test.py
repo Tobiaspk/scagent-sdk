@@ -194,7 +194,7 @@ def test_normal_large_state_keeps_decision_ready_projection_inline(tmp_path: Pat
                 "evidence": {
                     "evidence_id": "batch-evidence:abc",
                     "status": "complete",
-                    "recommendation": "cannot_determine_technical_vs_biological",
+                    "recommendation": "integration_recommended",
                     "terminal_summary": "Donors separate, but design is unknown.",
                     "supported_identity_pairs": [
                         {"shared_genes": ["SFTPA1", "SFTPB"]} for _ in range(500)

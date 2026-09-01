@@ -1,29 +1,32 @@
 # Decision guide
 
-## The two evidence axes
+## The one evidence axis
 
-`gene_evidence` (primary, gene-level):
+The verdict rests on a single gene-level axis. The tool takes **no design or condition inputs** —
+whether a sample-linked split is technical or biological is an experimental-design question the user
+answers, never a lever the caller can pull to steer the recommendation. `design_interpretation` is
+therefore always `unknown`, and the design caveat is stated as narration beside the recommendation.
+
+`gene_evidence` (gene-level):
 
 - `none`: no supported cross-sample population match carries a direct gene difference.
 - `localized`: matched populations differ across samples, but no program recurs.
 - `recurring_sample_associated`: a consistently directed program recurs across ≥2 distinct
-  matched populations — the pattern suspicious for ambient RNA, sample-specific background, or a
-  procedure/source effect.
+  matched populations — the same cell type separating by sample across the dataset. This is the
+  actionable signal: the within-sample identity signatures of the matched clusters agree (same
+  population, sample held constant), yet they cluster apart, so a sample-linked axis is splitting a
+  shared population.
 
-`design_interpretation` (experimental design):
+## Recommendation (non-binding, gene-evidence only)
 
-- `confounded_with_biology`: the batch is perfectly confounded with a supplied condition column.
-- `orthogonal_but_not_known_technical`: a supplied condition is present and not confounded, but the
-  batch is not documented technical.
-- `unknown`: no design information resolves the cause.
+| gene_evidence | recommendation |
+|---|---|
+| none / localized | do_not_integrate_based_on_current_evidence |
+| recurring_sample_associated | integration_recommended |
 
-## Recommendation (non-binding)
-
-| gene_evidence | design | recommendation |
-|---|---|---|
-| none / localized | any | do_not_integrate_based_on_current_evidence |
-| recurring | unknown / confounded_with_biology | cannot_determine_technical_vs_biological |
-| recurring | orthogonal_but_not_known_technical | integration_optional_for_confirmed_replicates |
+`integration_recommended` presents **integrate (scVI)** as the recommended default; it does not
+authorize anything. The user still chooses, because the genes cannot settle whether the split is a
+technical batch effect or the per-sample biology the user means to study.
 
 ## Deciding
 
@@ -33,6 +36,10 @@
 - `separate`: batches are incompatible assays, tissues, species, or irreducibly confounded designs.
 - If guidance is needed, ask the user and leave the decision unresolved. If no meaningful batch
   unit is present, `investigate_batch(batch_key=null)` records not-applicable evidence directly.
+- Present the options with a recommended default, mirroring the legacy post-investigation
+  checkpoint: with recurring gene evidence and confirmed cross-sample identity pairs, the default
+  offered is **integrate (scVI)**; with `none`/`localized` evidence it is **keep_uncorrected**.
+  The default is a presentation, not an authorization — the user's choice records the decision.
 
 ## Recurrence is advisory, not replication
 

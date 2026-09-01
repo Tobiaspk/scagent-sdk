@@ -5,11 +5,11 @@ two shared cell populations across two batches plus an injected **recurring** sa
 program, and checks:
 
 A. recurring program detected across >=2 populations -> gene_evidence=recurring_sample_associated,
-   design unknown -> cannot_determine_technical_vs_biological (NOT auto-integrate);
-B. the same data with a perfectly confounded condition column -> design is
-   confounded_with_biology and the recommendation remains conservative;
+   design always unknown (the tool takes no design inputs) -> recommendation=integration_recommended
+   (a recommended default, NOT an auto-decision — the tool records nothing);
+B. a handling choice records only decision, rationale, and evidence id, against that evidence;
 C. pair-order invariance: shuffling cell/region order yields the same recurrence verdict;
-D. a handling choice records only decision, rationale, and evidence id.
+D. schema/gene-class versioning is present.
 """
 
 from __future__ import annotations
@@ -126,39 +126,29 @@ def main() -> int:
         "min_enrichment": 1.0,  # both batches are 50% of each cluster here
     }
 
-    # A. recurring program, no design info -> cannot determine (never auto-integrate).
+    # A. recurring program, design always unknown -> integration recommended as a default
+    # (the tool records no decision; the recommendation is gene-evidence only).
     a_ctx = _context(workdir, prepared, "a")
     a = batch.run_evidence(dict(base_args), a_ctx)
     a_full = json.loads((a_ctx.staging_dir / "batch-evidence.json").read_text())
     checks["A_recurring_detected"] = a["details"]["gene_evidence"] == "recurring_sample_associated"
     checks["A_design_unknown"] = a["details"]["design_interpretation"] == "unknown"
-    checks["A_not_auto_integrate"] = (
-        a["details"]["recommendation"] == "cannot_determine_technical_vs_biological"
+    checks["A_integration_recommended"] = (
+        a["details"]["recommendation"] == "integration_recommended"
     )
     recurring_genes = {r["gene"] for r in a_full["recurring_programs"]}
     checks["A_recurring_includes_injected"] = bool(recurring_genes & {"SOD2", "FOSL2", "IER3"})
     checks["A_matches_are_real_identity"] = a_full["n_supported_matches"] >= 1
 
-    # B. A confounded condition is reported conservatively.
-    b = batch.run_evidence(
-        dict(base_args, condition_keys=["condition"]),
-        _context(workdir, prepared, "b"),
-    )
-    checks["B_confounding_detected"] = (
-        b["details"]["design_interpretation"] == "confounded_with_biology"
-    )
-    checks["B_recommendation_conservative"] = (
-        b["details"]["recommendation"] == "cannot_determine_technical_vs_biological"
-    )
-
-    # B2. The user's choice is recorded without model-written authorization ceremony.
-    decision_ctx = _context(workdir, prepared, "b2")
-    decision_ctx.state_facts["batch"] = {"evidence": b["details"], "decision": None}
+    # B. The user's choice is recorded without model-written authorization ceremony, bound to the
+    # current evidence id.
+    decision_ctx = _context(workdir, prepared, "b")
+    decision_ctx.state_facts["batch"] = {"evidence": a["details"], "decision": None}
     decision = batch.run_decision(
         {
-            "evidence_id": b["details"]["evidence_id"],
-            "decision": "keep_uncorrected",
-            "rationale": "Preserve the confounded biological contrast.",
+            "evidence_id": a["details"]["evidence_id"],
+            "decision": "integrate",
+            "rationale": "User confirmed the donors are comparable replicates; co-embed with scVI.",
         },
         decision_ctx,
     )
@@ -202,10 +192,7 @@ def main() -> int:
                     )
                 },
                 "A_recurring": a_full["recurring_programs"][:5],
-                "B": {
-                    k: b["details"][k]
-                    for k in ("design_interpretation", "recommendation")
-                },
+                "B_decision": decision["details"],
             },
             indent=2,
             default=str,

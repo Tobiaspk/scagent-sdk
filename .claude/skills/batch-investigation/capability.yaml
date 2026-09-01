@@ -1,7 +1,7 @@
 schema_version: 1
 skill:
   id: batch-investigation
-  version: "0.8.0"
+  version: "0.9.0"
   description: Gene-first batch evidence followed by one concise, evidence-bound handling choice.
 tools:
   - name: investigate_batch
@@ -19,12 +19,6 @@ tools:
           type: [string, "null"]
           description: Observation column for a meaningful batch unit; null records not_applicable.
         cluster_key: {type: string, default: leiden}
-        condition_keys:
-          type: array
-          uniqueItems: true
-          items: {type: string, minLength: 1}
-          default: []
-          description: Design/condition columns to cross-tab against the batch key for confounding.
       required: [batch_key]
       additionalProperties: false
     primary_matrix_input: path
@@ -33,7 +27,6 @@ tools:
     entrypoint: scripts/investigate.py:run_decision
     environment: gpu-singlecell
     activity_label: Recording batch decision
-    floors: [current_batch_evidence]
     input_schema:
       type: object
       properties:

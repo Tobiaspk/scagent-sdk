@@ -273,22 +273,20 @@ def classify_gene_evidence(n_matched_with_diffs: int, n_recurring_populations: i
     return "none"
 
 
-def classify_design(*, confounded_columns: list[str], has_orthogonal_condition: bool) -> str:
-    """Summarize only what supplied condition columns establish about the design."""
-    if confounded_columns:
-        return "confounded_with_biology"
-    if has_orthogonal_condition:
-        return "orthogonal_but_not_known_technical"
-    return "unknown"
+def recommend(gene_evidence: str) -> str:
+    """Return a non-binding recommendation driven ONLY by the gene evidence.
 
-
-def recommend(gene_evidence: str, design_interpretation: str) -> str:
-    """Return a conservative, non-binding recommendation from the observed evidence."""
-    if gene_evidence in ("none", "localized"):
-        return "do_not_integrate_based_on_current_evidence"
-    if design_interpretation == "orthogonal_but_not_known_technical":
-        return "integration_optional_for_confirmed_replicates"
-    return "cannot_determine_technical_vs_biological"
+    The technical-versus-biological question is an experimental-design call the user makes, not a
+    verdict the data can settle, so the recommendation no longer branches on a design axis (and the
+    tool no longer accepts design assertions that let the caller steer it). Confirmed cross-sample
+    split populations — the same cell type separating by sample across the dataset, established by
+    matching within-sample identity signatures — are the actionable signal that integrating to
+    co-embed those shared populations is worth doing. The user still authorizes it, and the design
+    caveat travels alongside the recommendation as narration, never as a competing verdict.
+    """
+    if gene_evidence == "recurring_sample_associated":
+        return "integration_recommended"
+    return "do_not_integrate_based_on_current_evidence"
 
 
 # --- plain-language translation (no jargon reaches the reader or the model) ---
@@ -307,30 +305,23 @@ GENE_EVIDENCE_PLAIN = {
         "a pattern that spans the dataset rather than one cell type"
     ),
 }
+# The tool takes no design inputs, so ``design_interpretation`` is always ``unknown`` — the design
+# question (technical vs biological) is the user's to answer. This caveat is stated as narration
+# beside the gene-driven recommendation, never as a competing verdict.
 DESIGN_PLAIN = {
     "unknown": (
         "no experimental-design information was provided, so we cannot tell whether the samples "
         "are meant to be comparable replicates or are different patients/conditions"
     ),
-    "confounded_with_biology": (
-        "each sample lines up with one biological condition, so technical and biological "
-        "differences cannot be told apart"
-    ),
-    "orthogonal_but_not_known_technical": (
-        "a condition label exists and is not redundant with sample, but that alone does not make "
-        "the differences technical (per-donor biology can remain)"
-    ),
 }
 VERDICT_PLAIN = {
-    "cannot_determine_technical_vs_biological": (
-        "the technical-versus-biological origin of these differences cannot be determined from the "
-        "genes alone, so the dataset should not be integrated automatically"
+    "integration_recommended": (
+        "the same cell type is separating by sample across the dataset, so integrating (scVI) to "
+        "co-embed the shared populations is recommended — unless that per-sample difference is the "
+        "biology you mean to study, which only you can say"
     ),
     "do_not_integrate_based_on_current_evidence": (
         "the current gene evidence does not justify integrating the dataset"
-    ),
-    "integration_optional_for_confirmed_replicates": (
-        "integration may be reasonable only if the samples are intended as comparable replicates"
     ),
 }
 SUGGESTION_PLAIN = {
@@ -339,19 +330,16 @@ SUGGESTION_PLAIN = {
         "It is reasonable to proceed without integrating; revisit only if you have a specific "
         "reason to expect a technical batch effect."
     ),
-    "cannot_determine_technical_vs_biological": (
-        "Based on the genes alone there is no clear evidence that this dataset must be integrated. "
-        "We did see sample-linked differences, but they are equally consistent with a technical "
-        "batch or with real differences between the samples, and without design information we "
-        "cannot tell which. Before integrating, confirm whether these samples are meant to be "
-        "comparable replicates — if they are, integration is reasonable; if they are different "
-        "patients or conditions, integrating risks erasing real biology."
-    ),
-    "integration_optional_for_confirmed_replicates": (
-        "There is no clear evidence forcing integration. The sample-linked differences recur "
-        "across the dataset and the condition metadata is not confounded with sample, so "
-        "integration is reasonable IF these samples are intended as comparable replicates — "
-        "otherwise it may remove real per-sample biology."
+    "integration_recommended": (
+        "The same cell type appears split by sample across the dataset: the within-sample identity "
+        "signatures of the matched clusters agree, so they are the same population separated by "
+        "sample rather than different cell types. That split is exactly what integration is meant "
+        "to fix — integrating with scVI (the sample as the batch covariate) co-embeds these shared "
+        "populations. The one thing the genes cannot tell you is whether that per-sample difference "
+        "is a technical batch effect or real biology you intend to study; that is an experimental-"
+        "design question only you can answer. Recommended: integrate with scVI — unless these "
+        "per-sample differences are the contrast you want to keep, in which case keep the "
+        "uncorrected representation or analyze the samples separately."
     ),
 }
 
@@ -589,16 +577,41 @@ def build_terminal_summary(
             f"{float(mixing.get('random_composition_same_batch_fraction', 0.0)):.1%} expected "
             "from composition (advisory only)."
         )
+    # Decision framing mirrors the legacy post-investigation checkpoint, but the recommendation is
+    # fixed by the gene evidence, not by anything the caller passed. When the same cell type is
+    # split by sample across the dataset, integration is the recommended default; otherwise
+    # keep-uncorrected is. Either way the tool NEVER records the decision — the user does. The pause
+    # is deliberately emphatic because a prior run auto-recorded a decision the user never made.
+    if gene_evidence == "recurring_sample_associated":
+        checkpoint = (
+            "Decision checkpoint — STOP HERE, DO NOT DECIDE YOURSELF. Explain to the user: the "
+            "strongest cross-sample identity pair, the recurring-program evidence, and the one "
+            "thing the genes cannot settle — whether this per-sample difference is a technical "
+            "batch effect or the biology they want to study. The same populations appear split by "
+            "sample across the dataset, so present **integrate with scVI as the recommended "
+            "default**. Then offer these choices, in this order, and WAIT for the user's answer: "
+            "(1) integrate with scVI (recommended), (2) keep the uncorrected representation, "
+            "(3) analyze the samples separately, (4) describe the experiment setup so we can "
+            "understand it better. Do NOT call decide_batch_handling, and do NOT start "
+            "integration, until the user has chosen — recording a decision the user did not make "
+            "is a bug. END YOUR TURN now."
+        )
+    else:
+        checkpoint = (
+            "Decision checkpoint — STOP HERE, DO NOT DECIDE YOURSELF. The gene evidence does not "
+            "support a dataset-wide correction, so present **keep the uncorrected representation "
+            "as the recommended default**. Then offer, in this order, and WAIT for the user's "
+            "answer: (1) keep the uncorrected representation (recommended), (2) integrate with "
+            "scVI, (3) analyze the samples separately, (4) describe the experiment setup so we can "
+            "understand it better. Do NOT call decide_batch_handling until the user has chosen. "
+            "END YOUR TURN now."
+        )
     lines.extend(
         [
             "",
             f"Recommendation: {SUGGESTION_PLAIN.get(recommendation, recommendation)}",
             "",
-            "Decision checkpoint: explain the strongest identity pair, the recurring-program "
-            "evidence, and the design limitation to the user. Ask whether to integrate with "
-            "scVI, keep the uncorrected representation, analyze samples separately, or provide "
-            "missing design context. Do not record a batch-handling decision until the user "
-            "chooses.",
+            checkpoint,
         ]
     )
     return "\n".join(lines)
@@ -891,7 +904,6 @@ def run_evidence(arguments: dict[str, Any], context: Any) -> dict[str, Any]:  # 
     path = Path(str(arguments["path"])).expanduser().resolve()
     batch_key = arguments.get("batch_key")
     cluster_key = str(arguments.get("cluster_key", "leiden"))
-    condition_keys = [str(k) for k in arguments.get("condition_keys", [])]
     min_cells_region = int(arguments.get("min_cells_per_region", 30))
     min_enrichment = float(arguments.get("min_enrichment", 2.0))
     n_identity_genes = int(arguments.get("n_identity_genes", 50))
@@ -910,7 +922,6 @@ def run_evidence(arguments: dict[str, Any], context: Any) -> dict[str, Any]:  # 
     seed = int(arguments.get("random_seed", 0))
     effective_parameters = {
         "cluster_key": cluster_key,
-        "condition_keys": sorted(condition_keys),
         "min_cells_per_region": min_cells_region,
         "min_enrichment": min_enrichment,
         "n_identity_genes": n_identity_genes,
@@ -1308,52 +1319,17 @@ def run_evidence(arguments: dict[str, Any], context: Any) -> dict[str, Any]:  # 
     for r in recurring:
         recurring_by_sample.setdefault(str(r["higher_in_batch"]), []).append(str(r["gene"]))
 
-    # --- stage 6: design / confounding --------------------------------------
-    confounding_rows: list[dict[str, Any]] = []
-    confounded_columns: list[str] = []
-    has_orthogonal = False
-    for column in condition_keys:
-        if column not in adata.obs:
-            confounding_rows.append({"column": column, "status": "absent"})
-            continue
-        raw = adata.obs[column]
-        n_missing = int(raw.isna().sum())
-        values = raw.astype(str)
-        ctab = pd.crosstab(batch, values)
-        perfectly_confounded = bool(((ctab > 0).sum(axis=1) == 1).all())
-        assoc = _cramers_v(ctab)
-        # Record how batch levels map onto condition levels so a reader can see the design, not
-        # just a scalar association.
-        mapping = {
-            str(level): sorted(map(str, row[row > 0].index)) for level, row in ctab.iterrows()
-        }
-        confounding_rows.append(
-            {
-                "column": column,
-                "status": "present",
-                "perfectly_confounded": perfectly_confounded,
-                "cramers_v": assoc,
-                "n_missing": n_missing,
-                "n_condition_levels": int(values.nunique()),
-                "batch_to_condition_levels": json.dumps(mapping, sort_keys=True),
-            }
-        )
-        if perfectly_confounded:
-            confounded_columns.append(column)
-        elif assoc < 0.8:
-            has_orthogonal = True
-    pd.DataFrame(confounding_rows).to_csv(
-        context.staging_dir / "design-confounding.csv", index=False
-    )
-
+    # --- stage 6: verdict ---------------------------------------------------
+    # The recommendation is driven ONLY by the gene evidence. The tool deliberately takes no design
+    # or condition inputs from the caller: whether a sample-linked split is a technical batch or the
+    # biology of interest is an experimental-design question the user answers, not a lever the agent
+    # can pull to steer the verdict. ``design_interpretation`` stays a fixed ``unknown`` so the
+    # design caveat is always stated honestly beside the recommendation.
     n_matched_with_diffs = len({r["population"] for r in direct_rows})
     n_recurring_populations = max((r["n_populations"] for r in recurring), default=0)
     gene_evidence = classify_gene_evidence(n_matched_with_diffs, n_recurring_populations)
-    design_interpretation = classify_design(
-        confounded_columns=confounded_columns,
-        has_orthogonal_condition=has_orthogonal,
-    )
-    recommendation = recommend(gene_evidence, design_interpretation)
+    design_interpretation = "unknown"
+    recommendation = recommend(gene_evidence)
 
     plain_interpretation = build_plain_interpretation(
         batch_key=batch_key,
@@ -1426,8 +1402,6 @@ def run_evidence(arguments: dict[str, Any], context: Any) -> dict[str, Any]:  # 
         "n_direct_compared_pairs": len(de_edges),
         "n_recurring_programs": len(recurring),
         "recurring_programs": recurring[:20],
-        "confounding": confounding_rows,
-        "confounded_columns": confounded_columns,
         "de_engine": DE_ENGINE,
         "gene_class_version": GENE_CLASS_VERSION,
         "plain_interpretation": plain_interpretation,
@@ -1504,11 +1478,6 @@ def run_evidence(arguments: dict[str, Any], context: Any) -> dict[str, Any]:  # 
         {
             "name": "recurring-programs",
             "relative_path": "recurring-programs.csv",
-            "media_type": "text/csv",
-        },
-        {
-            "name": "design-confounding",
-            "relative_path": "design-confounding.csv",
             "media_type": "text/csv",
         },
         {
@@ -1599,13 +1568,6 @@ def _write_evidence_report(path: Path, evidence: dict[str, Any]) -> None:
         "dataset-wide is still not the same as technical. This is an advisory signal from "
         "cell-level tests, not "
         "biological replication; weigh `pct_a`/`pct_b` and effect size before trusting a program.",
-        "",
-        "### `design-confounding.csv` — the piece the genes can't supply",
-        "Whether the study design lets us separate 'which sample' from 'which biological "
-        "condition'. If every sample is one condition, a technical batch and a real biological "
-        "difference cannot be told apart from the data. `status = unknown` means no design "
-        "metadata was available — "
-        "recorded honestly, not as 'not confounded'.",
         "",
         "### `batch-composition.png` + `batch-cluster-*.csv` — advisory context",
         "How each sample is distributed across clusters, and the ARI/NMI agreement between "

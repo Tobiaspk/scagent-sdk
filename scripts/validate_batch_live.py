@@ -74,7 +74,6 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         {
             "path": str(prepared_path),
             "batch_key": args.batch_key,
-            "condition_keys": args.condition_keys,
             "max_regions": args.max_regions,
             "random_seed": args.random_seed,
         },
@@ -124,7 +123,6 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--title", default="Gene-first batch live acceptance")
     parser.add_argument("--organism", choices=("human", "mouse"), default="human")
     parser.add_argument("--batch-key", default="sample")
-    parser.add_argument("--condition-keys", nargs="*", default=[])
     parser.add_argument("--decision", default="keep_uncorrected")
     parser.add_argument("--max-regions", type=int, default=20)
     parser.add_argument("--random-seed", type=int, default=0)
