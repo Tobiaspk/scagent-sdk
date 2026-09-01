@@ -181,9 +181,9 @@ scimilarity's suite (or at minimum the annotation skill end-to-end) under py3.14
   plus per-step deltas. On the measured add-an-embedding case that is a ~33× reduction in new bytes
   for that step (30 KB written vs a full ~3 MB copy).
 - The artifact unit is a directory. Anything that assumed one file per version — the lineage/head
-  index walk, output-view size reporting (`output_view.py` already lists `.zarr` as a matrix
-  suffix), retention's `du`-style accounting — must treat a store as a tree. Retention already
-  walks trees; the executor and output view need the D5 generalization.
+  index walk, output-view size reporting, retention's `du`-style accounting — must treat a store
+  as a tree. Retention and the executor walk trees; the output view now projects a declared `.zarr`
+  directory as one intermediate data artifact rather than silently dropping it.
 - Reproducibility is unchanged: stores are frozen, hashed, and fingerprinted like files. Hard-linking
   is invisible to readers and safe under immutability.
 - We take on more inodes per artifact under v2 (no sharding). Acceptable at current dataset sizes;
@@ -214,6 +214,11 @@ scimilarity's suite (or at minimum the annotation skill end-to-end) under py3.14
   pipeline (~0% dedup) — the unit tests reused one store name and missed it. Dedup now matches by
   **content** (sha256, size-bucketed, filecmp collision guard). Verified on the real session's
   `pca.zarr → neighbors.zarr`: 1272 files linked, 374 MB reclaimed (68% of the child) vs 0 before.
+- **Portable-delivery follow-up (2026-08-26)** — `export_anndata` is the ungated rung between an
+  internal Zarr working version and floor-gated scientific finalization. It writes one compressed,
+  round-trip-verified H5AD, registers it as a user-facing data artifact, preserves the AnnData
+  payload, records the consumed lineage input, and does not advance the scientific head. This
+  keeps Zarr-per-step dedup while making partial analyses deliverable without an ad-hoc script.
 - **P2** — Guarded prune that frees only `reclaimable` bytes, plus the disposition vocabulary
   (`retained`/`pinned`/`rejected`) retention already flagged as missing. First point at which bytes
   are actually deleted.

@@ -16,21 +16,30 @@ def _commit_artifact(
     execution_id: str,
     tool_name: str,
     summary: str,
-    files: list[tuple[str, str, str, bytes]],
+    files: list[tuple[str, str, str, bytes | dict[str, bytes]]],
 ) -> Path:
     artifact_path = session.directory / "artifacts" / "capabilities" / execution_id
     artifact_path.mkdir(parents=True)
     records: list[dict[str, Any]] = []
     for name, relative_path, media_type, content in files:
         path = artifact_path / relative_path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(content)
+        if isinstance(content, dict):
+            path.mkdir(parents=True, exist_ok=True)
+            for member, value in content.items():
+                member_path = path / member
+                member_path.parent.mkdir(parents=True, exist_ok=True)
+                member_path.write_bytes(value)
+            size_bytes = sum(map(len, content.values()))
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
+            size_bytes = len(content)
         records.append(
             {
                 "name": name,
                 "relative_path": relative_path,
                 "media_type": media_type,
-                "size_bytes": len(content),
+                "size_bytes": size_bytes,
             }
         )
     artifact_record = {
@@ -279,6 +288,56 @@ def test_intermediate_data_is_separated_from_final_data(tmp_path: Path) -> None:
     assert projected.is_symlink()
     assert projected.resolve() == artifact_path / "umap.h5ad"
     assert not (session.directory / "data" / "final-annotated.h5ad").exists()
+
+
+def test_zarr_store_is_projected_as_one_intermediate_data_artifact(tmp_path: Path) -> None:
+    session = AnalysisSession.create(tmp_path / "sessions", title="zarr data")
+    artifact_path = _commit_artifact(
+        session,
+        execution_id="12121212-1111-2222-3333-444444444444",
+        tool_name="compute_single_cell_umap",
+        summary="Computed UMAP",
+        files=[
+            (
+                "umap-anndata",
+                "umap.zarr",
+                "application/vnd.zarr",
+                {".zgroup": b"{}", "X/0.0": b"chunk"},
+            )
+        ],
+    )
+
+    projected = next((session.directory / "data" / "intermediates").glob("*.zarr"))
+    assert projected.is_symlink()
+    assert projected.resolve() == artifact_path / "umap.zarr"
+    assert (projected / "X" / "0.0").read_bytes() == b"chunk"
+    index = json.loads((session.directory / "outputs.json").read_text())
+    assert index["categories"]["data"][0]["media_type"] == "application/vnd.zarr"
+    assert ".zarr" in (session.directory / "outputs.md").read_text()
+
+
+def test_exported_h5ad_is_projected_as_a_user_facing_data_result(tmp_path: Path) -> None:
+    session = AnalysisSession.create(tmp_path / "sessions", title="exported data")
+    artifact_path = _commit_artifact(
+        session,
+        execution_id="34343434-1111-2222-3333-444444444444",
+        tool_name="export_anndata",
+        summary="Exported the current analysis as H5AD",
+        files=[
+            (
+                "portable-anndata",
+                "analysis-result.h5ad",
+                "application/x-h5ad",
+                b"H5AD",
+            )
+        ],
+    )
+
+    projected = next((session.directory / "data").glob("*.h5ad"))
+    assert projected.is_symlink()
+    assert projected.resolve() == artifact_path / "analysis-result.h5ad"
+    assert not list((session.directory / "data" / "intermediates").glob("*.h5ad"))
+    assert "`export_anndata`" in (session.directory / "outputs.md").read_text()
 
 
 def test_repeated_names_remain_distinct_and_traceable(tmp_path: Path) -> None:

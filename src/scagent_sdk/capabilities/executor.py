@@ -204,7 +204,7 @@ def _matrix_input(tool: CapabilityTool, arguments: Mapping[str, Any]) -> str | N
 
 
 def _matrix_output(tool: CapabilityTool, files: list[dict[str, Any]]) -> str | None:
-    """The artifact that continues the lineage, per this tool's declaration.
+    """The declared matrix artifact, whether it continues lineage or is a format-only derivative.
 
     Named rather than detected: CellBender emits three ``.h5`` matrices of which only the filtered
     one continues the analysis. A tool may declare an output it does not always produce -- cluster
@@ -437,7 +437,7 @@ class CapabilityExecutor:
 
         lineage = self.session.store.state.lineage
         head = active_head(lineage)
-        continues_lineage = tool.primary_matrix_output is not None
+        continues_lineage = tool.primary_matrix_output is not None and tool.advances_lineage
         requested = _matrix_input(tool, resolved_arguments)
         source = "supplied"
 
@@ -734,6 +734,7 @@ class CapabilityExecutor:
         # the compute has already been reported as successful.
         matrix_output = _matrix_output(tool, files)
         dispatch_lineage["matrix_output"] = matrix_output
+        dispatch_lineage["advances_lineage"] = tool.advances_lineage
         dispatch_lineage["operation"] = tool.lineage_operation
         if has_prepared_path(result.facts_patch):
             raise CapabilityExecutionError(
@@ -741,6 +742,12 @@ class CapabilityExecutor:
                 "remove it from the skill result"
             )
         node_facts, _ = partition_facts_patch(result.facts_patch)
+        if matrix_output is not None and not tool.advances_lineage and node_facts:
+            raise CapabilityExecutionError(
+                f"tool {tool.name} declares a non-advancing matrix output but returned "
+                "node-scoped scientific facts; a format-only derivative cannot change the "
+                "analysis state"
+            )
         if matrix_output is None and node_facts:
             requested = dispatch_lineage.get("requested_input")
             parent = dispatch_lineage.get("resolved_input_execution_id")
@@ -853,6 +860,8 @@ class CapabilityExecutor:
         dispatch = data.get("lineage")
         if not isinstance(dispatch, Mapping) or not dispatch.get("matrix_output"):
             return
+        if dispatch.get("advances_lineage", True) is False:
+            return
         if dispatch.get("branch_intent"):
             return
         base_value = dispatch.get("base_head_execution_id")
@@ -931,6 +940,7 @@ class CapabilityExecutor:
             return self._checkout_state_patch(data, session_facts, state)
 
         matrix_output = dispatch.get("matrix_output")
+        advances_lineage = dispatch.get("advances_lineage", True) is not False
         branch_intent = bool(dispatch.get("branch_intent"))
         adopt_intent = bool(dispatch.get("adopt_intent"))
         requested = dispatch.get("requested_input")
@@ -946,7 +956,7 @@ class CapabilityExecutor:
             )
         head = active_head(lineage)
 
-        if not isinstance(matrix_output, str) or not matrix_output:
+        if not advances_lineage or not isinstance(matrix_output, str) or not matrix_output:
             # Read-only: no node, no head movement. Its node-scoped evidence still has to be
             # attached to the node it describes, or a later checkout loses it.
             if requested is not None and parent is None and node_facts:
@@ -1256,31 +1266,52 @@ class CapabilityExecutor:
         """
 
         recovered: list[str] = []
+        state_artifacts = self.session.store.state.artifacts
+        committed_directories: set[str] = set()
+        for execution_id, raw_record in state_artifacts.items():
+            committed_directories.add(execution_id)  # legacy ``artifacts/capabilities/<id>``
+            if isinstance(raw_record, Mapping):
+                recorded_path = raw_record.get("path")
+                if isinstance(recorded_path, str) and recorded_path:
+                    committed_directories.add(Path(recorded_path).name)
+
         candidates = list(self.pending_root.iterdir() if self.pending_root.exists() else [])
         candidates.extend(
             path
             for path in (self.artifact_root.iterdir() if self.artifact_root.exists() else [])
-            if path.name not in self.session.store.state.artifacts
+            if path.name not in committed_directories
         )
         order = self._staged_sequence()
-        pending: list[tuple[int, Path]] = []
-        unsequenced: list[Path] = []
+        pending: list[tuple[int, str, Path]] = []
+        unsequenced: list[tuple[str, Path]] = []
         for path in candidates:
             if not path.is_dir() or not (path / "result.json").is_file():
                 continue
-            sequence = order.get(path.name)
+            try:
+                staged = json.loads((path / "result.json").read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                staged = {}
+            recorded_execution_id = staged.get("execution_id")
+            execution_id = (
+                recorded_execution_id
+                if isinstance(recorded_execution_id, str) and recorded_execution_id
+                else path.name
+            )
+            sequence = order.get(execution_id)
             if sequence is None:
-                unsequenced.append(path)
+                unsequenced.append((execution_id, path))
             else:
-                pending.append((sequence, path))
-        for _, path in sorted(pending, key=lambda item: (item[0], item[1].name)):
-            if self.commit(path.name):
-                recovered.append(path.name)
-        for path in sorted(unsequenced):
-            self._quarantine(path)
+                pending.append((sequence, execution_id, path))
+        for _, execution_id, _path in sorted(
+            pending, key=lambda item: (item[0], item[1], item[2].name)
+        ):
+            if self.commit(execution_id):
+                recovered.append(execution_id)
+        for execution_id, path in sorted(unsequenced, key=lambda item: (item[0], item[1].name)):
+            self._quarantine(path, execution_id=execution_id)
         return recovered
 
-    def _quarantine(self, path: Path) -> None:
+    def _quarantine(self, path: Path, *, execution_id: str | None = None) -> None:
         """Move an unorderable staged result aside and record why."""
 
         target = self.quarantine_root / path.name
@@ -1294,7 +1325,7 @@ class CapabilityExecutor:
             self.session.store.record(
                 "capability.result_quarantined",
                 payload={
-                    "execution_id": path.name,
+                    "execution_id": execution_id or path.name,
                     "reason": "no capability.result_staged event; commit order is undefined",
                     "path": str(target.relative_to(self.session.directory)),
                 },

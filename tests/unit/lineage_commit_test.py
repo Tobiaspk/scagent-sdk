@@ -62,6 +62,16 @@ tools:
         path: {type: string}
         facts: {type: object}
     primary_matrix_input: path
+  - name: export_matrix
+    description: publish a format-only matrix artifact
+    entrypoint: scripts/run.py:export_matrix
+    input_schema:
+      type: object
+      properties:
+        path: {type: string}
+    primary_matrix_input: path
+    primary_matrix_output: portable-matrix
+    advances_lineage: false
   - name: review_facts
     description: write node-scoped evidence from facts only
     entrypoint: scripts/run.py:write_evidence
@@ -108,6 +118,22 @@ def write_evidence(arguments, context):
                 "name": "evidence",
                 "relative_path": "evidence.json",
                 "media_type": "application/json",
+            }
+        ],
+    }
+
+
+def export_matrix(arguments, context):
+    (context.staging_dir / "portable.h5ad").write_bytes(b"H5AD")
+    return {
+        "summary": "exported a matrix",
+        "details": {},
+        "facts_patch": {},
+        "artifacts": [
+            {
+                "name": "portable-matrix",
+                "relative_path": "portable.h5ad",
+                "media_type": "application/x-h5ad",
             }
         ],
     }
@@ -189,6 +215,28 @@ def test_parent_is_the_artifact_actually_consumed(tmp_path: Path) -> None:
     assert harness.lineage["nodes"][second]["parent_execution_id"] == first
     assert harness.lineage["nodes"][second]["resolved_input_execution_id"] == first
     assert ancestry(harness.lineage, second) == [second, first]
+
+
+def test_format_only_matrix_export_records_parent_without_advancing_head(
+    tmp_path: Path,
+) -> None:
+    harness = _Harness(tmp_path, "format-only-export")
+    first = harness.run("make_matrix")
+    second = harness.run("make_matrix")
+
+    exported = harness.run("export_matrix", path=harness.matrix_path(first))
+
+    assert active_head(harness.lineage) == second
+    assert exported not in harness.lineage["nodes"]
+    artifact = harness.session.store.state.artifacts[exported]
+    assert artifact["lineage"]["resolved_input_execution_id"] == first
+    assert artifact["lineage"]["input_relation"] == "ancestor"
+    assert artifact["lineage"]["matrix_output"] == "portable.h5ad"
+    assert artifact["lineage"]["advances_lineage"] is False
+    assert (harness.session.directory / artifact["path"] / "portable.h5ad").is_file()
+    assert harness.facts["analysis"]["dataset_revision"]["prepared_path"].endswith(
+        f"make-matrix--{second}/matrix.h5ad"
+    )
 
 
 def test_committing_a_child_hard_links_unchanged_files_to_its_parent(tmp_path: Path) -> None:

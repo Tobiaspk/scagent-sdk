@@ -576,6 +576,9 @@ def rebuild_forest(
         arguments = arguments if isinstance(arguments, Mapping) else {}
 
         dispatch = payload.get("lineage")
+        advances_lineage = not (
+            isinstance(dispatch, Mapping) and dispatch.get("advances_lineage", True) is False
+        )
         declared_name = dispatch.get("matrix_output") if isinstance(dispatch, Mapping) else None
         if not isinstance(declared_name, str) or not declared_name:
             declared_name = LEGACY_PRIMARY_MATRIX_OUTPUTS_V1.get(
@@ -592,7 +595,7 @@ def rebuild_forest(
             if isinstance(item, Mapping)
             and str(item.get("relative_path", "")).lower().endswith((".h5ad", ".zarr"))
         ]
-        matrices = declared or fallback
+        matrices = (declared or fallback) if advances_lineage else []
         if not declared and len(fallback) > 1:
             warnings.append(
                 f"{execution_id}: found {len(fallback)} possible matrix artifacts without a "

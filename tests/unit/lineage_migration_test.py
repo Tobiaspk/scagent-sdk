@@ -111,6 +111,21 @@ def test_read_only_evidence_is_replayed_onto_its_version() -> None:
     assert resolved["cluster_qc"] == {"status": "complete", "reviewed": True}
 
 
+def test_format_only_matrix_export_does_not_become_a_node_during_replay() -> None:
+    base = _event("base", writes="matrix.h5ad")
+    exported = _event("export", tool="export_anndata", reads=_artifact("base"))
+    exported[1]["files"] = [{"name": "portable-anndata", "relative_path": "portable.h5ad"}]
+    exported[1]["lineage"] = {
+        "matrix_output": "portable.h5ad",
+        "advances_lineage": False,
+    }
+
+    forest, _warnings = rebuild_forest([base, exported], merge=apply_merge_patch)
+
+    assert set(forest["nodes"]) == {"base"}
+    assert active_head(forest) == "base"
+
+
 def test_session_scoped_facts_are_not_attached_to_a_version() -> None:
     forest, _ = rebuild_forest(
         [
