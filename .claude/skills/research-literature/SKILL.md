@@ -9,7 +9,11 @@ Use this skill for **biological claims**. Use `research-web` for software docume
 APIs, and troubleshooting.
 
 1. Call `search_literature` with a specific query — include cell type, tissue, species, disease, or
-   gene names. Vague queries return vague evidence.
+   gene names. Vague queries return vague evidence. Build the query only from terms this analysis
+   has actually established: measured genes, recorded metadata, the user's own words. A term you
+   assumed turns the search into a leading question, and a handful of hits on a query containing it
+   is not confirmation — a search cannot tell you its premise was wrong. If a returned abstract does
+   not mention the term you searched on, that term is unsupported; drop it rather than keeping it.
 2. Narrow deliberately rather than by re-querying blindly: `reviews_only` for established consensus,
    `recent_years` for current findings, `open_access_only` when you intend to read full text,
    `pubmed_only` to exclude preprints and PMC-only records, `include_preprints: false` to drop

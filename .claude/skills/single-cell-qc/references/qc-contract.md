@@ -3,9 +3,11 @@
 The standard cell metrics are total counts, detected genes, and mitochondrial-count percentage.
 They describe technical or physiological signals; none alone proves a cell is unusable.
 
-Human mitochondrial symbols commonly begin `MT-`. Mouse symbols commonly begin `mt-` or `Mt-`.
-When `var_names` are Ensembl identifiers, a symbol column such as `feature_name`,
-`gene_symbol`, or `mgi_symbol` is used if present.
+Mitochondrial genes are detected case-insensitively on the `MT-` prefix, which covers human
+`MT-CO1` and mouse `mt-Co1` alike. There is no organism parameter and none is needed: the
+symbols themselves carry the answer, so nothing here has to be declared or guessed. When
+`var_names` are Ensembl identifiers, a symbol column such as `feature_name`, `gene_symbol`, or
+`mgi_symbol` is used if present.
 
 `calculate_single_cell_qc` writes Boolean flags for the requested thresholds and reports exact
 flag counts. It does not subset the object.

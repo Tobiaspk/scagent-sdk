@@ -18,7 +18,6 @@ tools:
           type: [string, "null"]
           default: auto
           description: "'auto' uses layers['counts'] when present and otherwise validates X; null explicitly uses X."
-        organism: {type: string, enum: [human, mouse], default: human}
         min_genes: {type: [integer, "null"], minimum: 0, default: 200}
         max_genes: {type: [integer, "null"], minimum: 1, default: null}
         max_pct_mito: {type: [number, "null"], minimum: 0, maximum: 100, default: 20}
@@ -63,7 +62,6 @@ tools:
           type: [string, "null"]
           default: auto
           description: "'auto' uses layers['counts'] when present and otherwise validates X; null explicitly uses X."
-        organism: {type: string, enum: [human, mouse], default: human}
         min_genes: {type: [integer, "null"], minimum: 0, default: null, description: "No default: state the cut you intend. The flag thresholds used for QC evidence are instrumentation and are not carried over into deletion."}
         max_genes: {type: [integer, "null"], minimum: 1, default: null}
         max_pct_mito: {type: [number, "null"], minimum: 0, maximum: 100, default: null, description: "No default. A mitochondrial cut applied before clustering deletes real high-MT biology (cardiomyocytes, hepatocytes, activated or secretory cells) along with dying cells; prefer flagging now and deciding at the cluster level."}

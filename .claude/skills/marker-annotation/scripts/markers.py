@@ -171,6 +171,7 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
 
     path = Path(str(arguments["path"])).expanduser().resolve()
     cluster_key = str(arguments.get("cluster_key", "leiden"))
+    # Gates the Cytopus knowledge base only; see the schema description.
     organism = str(arguments.get("organism", "human"))
     top_n = int(arguments.get("top_n", 30))
     min_logfoldchange = float(arguments.get("min_logfoldchange", 0.25))
@@ -218,11 +219,10 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
         .head(top_n)
     )
     custom = arguments.get("marker_sets", {})
+    # Not case-normalized per organism: _marker_frequency and _score_programs fold both sides
+    # to upper, so mouse Cd3e already scores against CD3E. Title-casing the built-in set here
+    # changed nothing except the recorded marker_sets_fingerprint.
     marker_sets = dict(HUMAN_MARKERS)
-    if organism == "mouse":
-        marker_sets = {
-            label: [gene.title() for gene in genes] for label, genes in marker_sets.items()
-        }
     cytopus_status: dict[str, Any] = {
         "status": "not_requested" if not use_cytopus else "not_applicable",
         "reason": "Cytopus identities are currently applied only to human data.",

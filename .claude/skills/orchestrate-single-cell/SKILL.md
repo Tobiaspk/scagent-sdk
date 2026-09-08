@@ -20,8 +20,12 @@ from an already processed artifact, and the observed data may require replanning
    doublets when raw counts permit it, and call `review_single_cell_qc` with a concrete keep/filter
    rationale. **Cell removal is normally deferred to step 4**: early QC flags are instrumentation,
    and a per-cell mitochondrial or complexity cut cannot separate a dying population from a real
-   high-mitochondrial cell type — only cluster context can. The expected decision here is therefore
-   `keep_all`, saying what the tail looks like and that it will be adjudicated at cluster QC.
+   high-mitochondrial cell type — only cluster context can. `keep_all` is therefore the usual
+   outcome — but reach it from the figures you just inspected rather than from this sentence: the
+   rationale must describe the tail you actually saw (where it sits, how large it is, how it tracks
+   complexity) and where it will be adjudicated. Do not dress it with tissue, disease, or cell-type
+   context that has not been established from the data; if the tissue is unknown, that is what the
+   rationale should say.
    Filter before clustering only for unambiguous non-cells (empty droplets, near-zero complexity
    debris), for a user- or source-specified protocol, or when debris would dominate the embedding —
    and then review *before* filtering, state the threshold and the exact count removed, and
@@ -78,9 +82,12 @@ from an already processed artifact, and the observed data may require replanning
    clustering the labels will bind to, and its QC round is what certifies it — then
    compute DEGs only once you are on the clustering you intend to annotate, since a DEG pass at a
    QC resolution is discarded when you later step down. Make that clustering current.
-7. For annotation, use SCimilarity early when it helps establish broad tissue/context, inspect the
-   complete readiness inventory of cached CellTypist models, and choose the closest organism/tissue
-   model rather than a generic immune default. When both are suitable, run and summarize both and
+7. For annotation, use SCimilarity early when it helps establish broad tissue/context — its
+   reference query is where an unknown tissue becomes evidence rather than an assumption, so run it
+   before anything that depends on knowing the tissue. Then inspect the complete readiness inventory
+   of cached CellTypist models and choose the closest organism/tissue model rather than a generic
+   immune default; a tissue-specific classifier chosen on an assumed tissue is worse than a broad
+   one, so while the tissue is still unknown, stay broad and say why. When both are suitable, run and summarize both and
    visualize their agreement. Generate cluster DEGs and marker programs; **DEGs are the primary
    decision basis**, while references and curated marker resources such as Cytopus corroborate or
    challenge the call. Query the reference atlas or literature for genuinely ambiguous clusters.

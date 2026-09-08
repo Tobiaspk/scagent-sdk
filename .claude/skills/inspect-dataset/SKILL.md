@@ -19,6 +19,12 @@ without trusting one large chunk. It remains a change detector, not a cryptograp
 every unsampled byte; use `full` when immutable identity matters. Treat path, size, format evidence,
 and fingerprint as facts; report uncertainty when extension and byte signature disagree.
 
+The path is a fact about the *file*, never about the biology. A file name, a directory, or a
+study name in an `obs` column tells you nothing about species, tissue, disease, or condition,
+and a recalled paper is not this dataset. Say what the file is called; do not convert it into a
+biological claim, and do not carry such a claim into a rationale, a decision, or a literature
+query.
+
 ## `describe_dataset` — dataset contents
 
 When the user asks **what is in a dataset**, or you need its structure before preprocessing or

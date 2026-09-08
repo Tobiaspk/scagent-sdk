@@ -102,6 +102,14 @@ composition of the nearest cells, the neighbor-distance distribution, and a cohe
 Use it to characterize a novel or ambiguous population, to see the tissue and disease context a
 population resembles, or to test whether one cluster is really two things.
 
+This is also the first point in an analysis where **tissue** can be read off the data rather than
+assumed. If the dataset carried no tissue metadata, a broad query across the main clusters is
+worth running for that alone: the returned `tissue` / `tissue_general` composition, weighted by
+how large each cluster is and read against the reference background, is evidence for what this
+sample is. Report it as what the reference says with its numbers, not as a settled fact — a
+population can resemble a tissue it did not come from. Until something like this has run, tissue
+is simply unknown, and "unknown" is the correct thing to say in a rationale or a report.
+
 Select cells one of two ways, never both:
 
 - `group_key` (plus optional `group_values`) selects groups of any obs column — a clustering, an

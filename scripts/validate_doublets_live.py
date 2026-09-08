@@ -131,7 +131,6 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--sessions-root", type=Path, default=Path.cwd() / "sessions")
     parser.add_argument("--title", default="Doublet evidence live acceptance")
     parser.add_argument("--resume-session")
-    parser.add_argument("--organism", choices=("human", "mouse"), default="human")
     parser.add_argument("--batch-key")
     parser.add_argument("--random-seed", type=int, default=0)
     return parser

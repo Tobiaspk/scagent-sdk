@@ -14,7 +14,7 @@ tools:
       properties:
         path: {type: string, description: Prepared H5AD path.}
         cluster_key: {type: string, default: leiden}
-        organism: {type: string, enum: [human, mouse], default: human}
+        organism: {type: string, enum: [human, mouse], default: human, description: "Gates the Cytopus knowledge base, which is human-only; it has no other effect. Marker scoring is case-folded, so it does not depend on this. Set mouse only when the dataset is known to be mouse - do not infer a species from gene-symbol casing or from the file name."}
         top_n: {type: integer, minimum: 5, maximum: 100, default: 30}
         min_logfoldchange: {type: number, default: 0.25}
         max_adjusted_pvalue: {type: number, exclusiveMinimum: 0, maximum: 1, default: 0.05}

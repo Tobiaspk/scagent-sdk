@@ -219,7 +219,6 @@ def _add_metrics(
     adata: Any,
     *,
     layer: str | None,
-    organism: str,
     min_genes: int | None,
     max_genes: int | None,
     max_pct_mito: float | None,
@@ -232,10 +231,10 @@ def _add_metrics(
     work = adata.copy()
     work.X = counts.copy()
     names = _symbols(work)
-    if organism == "mouse":
-        mt = [name.startswith(("mt-", "Mt-", "MT-")) for name in names]
-    else:
-        mt = [name.upper().startswith("MT-") for name in names]
+    # Case-insensitive, so this covers human MT-CO1 and mouse mt-Co1 alike; no species
+    # declaration is needed and none is accepted. A declared organism could only ever be
+    # wrong here, never useful.
+    mt = [name.upper().startswith("MT-") for name in names]
     ribo = [name.upper().startswith(("RPS", "RPL")) for name in names]
     work.var["mt"] = np.asarray(mt, dtype=bool)
     work.var["ribo"] = np.asarray(ribo, dtype=bool)
@@ -463,7 +462,6 @@ def calculate_qc(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
         raise FileNotFoundError(path)
     layer_arg = arguments.get("counts_layer", "auto")
     layer = str(layer_arg) if layer_arg is not None else None
-    organism = str(arguments.get("organism", "human"))
     min_arg = arguments.get("min_genes", 200)
     max_arg = arguments.get("max_genes")
     mito_arg = arguments.get("max_pct_mito", 20)
@@ -474,7 +472,7 @@ def calculate_qc(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     }
     source = _read_matrix(path)
     layer = _resolve_layer(source, layer)
-    adata, flags = _add_metrics(source, layer=layer, organism=organism, **thresholds)
+    adata, flags = _add_metrics(source, layer=layer, **thresholds)
     metadata = _base_metadata(adata)
     metadata["qc_assessment_id"] = _identity(
         "cell-qc",
@@ -490,7 +488,6 @@ def calculate_qc(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     final_path = f"{context.artifact_relative_path}/{output_name}"
     report = {
         "operation": "calculate_only",
-        "organism": organism,
         "counts_source": "X" if layer is None else f"layer:{layer}",
         "n_cells": int(adata.n_obs),
         "n_genes": int(adata.n_vars),
@@ -599,7 +596,6 @@ def filter_cells(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
         raise FileNotFoundError(path)
     layer_arg = arguments.get("counts_layer", "auto")
     layer = str(layer_arg) if layer_arg is not None else None
-    organism = str(arguments.get("organism", "human"))
     # Deliberately no threshold defaults on the mutating tool: the flag thresholds on
     # calculate_single_cell_qc are instrumentation, and inheriting them here would let a
     # bare call delete the mitochondrial tail as a side effect of a default.
@@ -618,7 +614,7 @@ def filter_cells(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     }
     source = _read_matrix(path)
     layer = _resolve_layer(source, layer)
-    assessed, flags = _add_metrics(source, layer=layer, organism=organism, **thresholds)
+    assessed, flags = _add_metrics(source, layer=layer, **thresholds)
     before = int(assessed.n_obs)
     filtered = assessed[assessed.obs["qc_pass_requested_thresholds"].to_numpy()].copy()
     if filtered.n_obs == 0:
