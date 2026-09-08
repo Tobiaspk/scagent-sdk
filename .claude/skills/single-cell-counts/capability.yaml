@@ -1,11 +1,11 @@
 schema_version: 1
 skill:
   id: single-cell-counts
-  version: "0.2.0"
+  version: "0.3.0"
   description: Independent raw-count source resolution and materialization.
 tools:
   - name: materialize_count_matrix
-    description: Load H5AD or 10x data, validate and select one raw-count source, and save a count-ready H5AD with preserved observations and variables.
+    description: Validate and materialize raw counts, or attach counts from an identity-matched source to the current analyzed artifact without discarding its expression, embeddings, graphs, or annotations.
     entrypoint: scripts/counts.py:run
     environment: gpu-singlecell
     activity_label: Materializing raw counts
@@ -14,6 +14,7 @@ tools:
       properties:
         branch_from: {type: string, description: "Fork an alternative from a recorded version instead of continuing the current one. The active version does not change. Use this to compare alternatives - not to work around a superseded path."}
         path: {type: string, description: Absolute input H5AD, 10x H5, or 10x Matrix Market directory.}
+        counts_from: {type: string, description: "Optional separate raw-count H5AD, Zarr, or 10x source. Its cells and genes must exactly match path; counts are aligned and attached to layers['counts'] while path remains the continuing artifact."}
         counts_source:
           type: string
           enum: [auto, X, raw, layer]

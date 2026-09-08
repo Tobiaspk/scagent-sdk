@@ -80,6 +80,48 @@ def _plot_convergence(history, out_path, *, epochs_trained: int, early_stopped: 
     return out_path.name
 
 
+def _training_metric_summary(history: Any) -> dict[str, Any]:
+    """Extract exact finite ELBO endpoints and the best validation epoch."""
+
+    import numpy as np
+
+    def series(name: str) -> tuple[Any, Any] | None:
+        frame = history.get(name) if history else None
+        if frame is None or getattr(frame, "empty", True):
+            return None
+        values = np.asarray(frame[frame.columns[0]], dtype=float)
+        indices = np.asarray(frame.index)
+        finite = np.isfinite(values)
+        if not finite.any():
+            return None
+        return values[finite], indices[finite]
+
+    train = series("elbo_train")
+    validation = series("elbo_validation")
+    train_values = train[0] if train is not None else None
+    validation_values = validation[0] if validation is not None else None
+    summary: dict[str, Any] = {
+        "final_train_elbo": (
+            float(train_values[-1]) if train_values is not None else None
+        ),
+        "final_validation_elbo": (
+            float(validation_values[-1]) if validation_values is not None else None
+        ),
+        "best_validation_elbo": (
+            float(np.min(validation_values)) if validation_values is not None else None
+        ),
+        "best_validation_epoch": None,
+    }
+    if validation is not None:
+        best_position = int(np.argmin(validation_values))
+        epoch = validation[1][best_position]
+        try:
+            summary["best_validation_epoch"] = int(epoch)
+        except (TypeError, ValueError):
+            summary["best_validation_epoch"] = str(epoch)
+    return summary
+
+
 def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     import scvi
 
@@ -134,11 +176,19 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
             "seed": seed,
         },
     )
+    representations = dict(old.get("representations", {}))
+    representations["X_scVI"] = {
+        "id": representation_id,
+        "method": "scvi",
+        "batch_key": batch_key,
+        "n_latent": n_latent,
+    }
     new_metadata = {
         **old,
         "cell_set_id": cell_set_id,
         "representation_id": representation_id,
         "representation_key": "X_scVI",
+        "representations": representations,
         "scvi": {
             "method": "scvi",
             "batch_key": batch_key,
@@ -149,7 +199,6 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     }
     new_metadata.pop("clustering_id", None)
     adata.uns["scagent_sdk"] = new_metadata
-    _write_matrix(adata, context.staging_dir / "scvi-latent.zarr")
     model_dir = context.staging_dir / "scvi-model"
     model.save(model_dir, overwrite=True)
     shutil.make_archive(str(context.staging_dir / "scvi-model"), "zip", model_dir)
@@ -158,6 +207,12 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     epochs_trained: int | None = None
     early_stopped = False
     convergence_figure: str | None = None
+    metric_summary: dict[str, Any] = {
+        "final_train_elbo": None,
+        "final_validation_elbo": None,
+        "best_validation_elbo": None,
+        "best_validation_epoch": None,
+    }
     if history:
         import pandas as pd
 
@@ -169,6 +224,7 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
         full_history.to_csv(context.staging_dir / "scvi-training-history.csv")
         epochs_trained = int(full_history.shape[0])
         early_stopped = epochs_trained < max_epochs
+        metric_summary = _training_metric_summary(history)
         convergence_figure = _plot_convergence(
             history,
             context.staging_dir / "scvi-training-history.png",
@@ -177,6 +233,20 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
         )
     else:
         (context.staging_dir / "scvi-training-history.csv").write_text("\n", encoding="utf-8")
+    training_summary = {
+        "max_epochs": max_epochs,
+        "max_epochs_source": epochs_source,
+        "epochs_trained": epochs_trained,
+        "early_stopping_enabled": True,
+        "early_stopped": early_stopped,
+        **metric_summary,
+    }
+    metadata = dict(adata.uns.get("scagent_sdk", {}))
+    scvi_metadata = dict(metadata.get("scvi", {}))
+    scvi_metadata["training"] = training_summary
+    metadata["scvi"] = scvi_metadata
+    adata.uns["scagent_sdk"] = metadata
+    _write_matrix(adata, context.staging_dir / "scvi-latent.zarr")
     return {
         "summary": (
             f"Trained scVI for {adata.n_obs:,} cells "
@@ -198,6 +268,7 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
             "max_epochs_source": epochs_source,
             "epochs_trained": epochs_trained,
             "early_stopped": early_stopped,
+            "training": training_summary,
             "representation_id": representation_id,
             "representation_key": "X_scVI",
         },
@@ -209,6 +280,15 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
                     "batch_key": batch_key,
                     "key": "X_scVI",
                 },
+                "representations": {
+                    "X_scVI": {
+                        "id": representation_id,
+                        "method": "scvi",
+                        "batch_key": batch_key,
+                        "n_latent": n_latent,
+                    }
+                },
+                "scvi_training": training_summary,
                 "clustering": None,
             },
             "cluster_qc": None,

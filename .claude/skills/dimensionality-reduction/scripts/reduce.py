@@ -128,11 +128,19 @@ def compute_pca(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
             "compute_backend": "rapids_singlecell",
         },
     )
+    representations = dict(metadata.get("representations", {}))
+    representations["X_pca"] = {
+        "id": representation_id,
+        "method": "pca",
+        "n_components": n_components,
+        "use_highly_variable": use_hvg,
+    }
     metadata.update(
         {
             "cell_set_id": cell_set_id,
             "representation_id": representation_id,
             "representation_key": "X_pca",
+            "representations": representations,
         }
     )
     metadata.pop("clustering_id", None)
@@ -207,10 +215,17 @@ def compute_pca(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
                     "key": "X_pca",
                     "n_components": n_components,
                 },
+                "representations": {
+                    "X_pca": {
+                        "id": representation_id,
+                        "method": "pca",
+                        "n_components": n_components,
+                        "use_highly_variable": use_hvg,
+                    }
+                },
                 "clustering": None,
             },
             "cluster_qc": None,
-            "batch": None,
             "annotation": None,
             "finalization": None,
         },
@@ -250,7 +265,20 @@ def build_neighbors(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     )
     _to_cpu(adata)
     metadata = dict(adata.uns.get("scagent_sdk", {}))
-    source_id = metadata.get("representation_id") or _identity(
+    representations = metadata.get("representations", {})
+    registered_source = (
+        representations.get(representation_key)
+        if isinstance(representations, dict)
+        else None
+    )
+    source_id = (
+        registered_source.get("id")
+        if isinstance(registered_source, dict)
+        else None
+    )
+    if not source_id and metadata.get("representation_key") == representation_key:
+        source_id = metadata.get("representation_id")
+    source_id = source_id or _identity(
         "representation-source",
         {
             "input_path": str(path),
@@ -270,7 +298,16 @@ def build_neighbors(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
             "compute_backend": "rapids_singlecell",
         },
     )
-    metadata.update({"representation_id": source_id, "neighbor_graph_id": graph_id})
+    metadata.update(
+        {
+            "representation_id": source_id,
+            "representation_key": representation_key,
+            "neighbor_graph_id": graph_id,
+            "neighbor_graph_key": neighbors_key,
+            "neighbor_graph_representation_id": source_id,
+            "neighbor_graph_representation_key": representation_key,
+        }
+    )
     metadata.pop("clustering_id", None)
     adata.uns["scagent_sdk"] = metadata
     report = {
@@ -308,11 +345,12 @@ def build_neighbors(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
                     "key": representation_key,
                     "neighbor_graph_id": graph_id,
                     "neighbors_key": neighbors_key,
+                    "neighbor_graph_representation_id": source_id,
+                    "neighbor_graph_representation_key": representation_key,
                 },
                 "clustering": None,
             },
             "cluster_qc": None,
-            "batch": None,
             "annotation": None,
             "finalization": None,
         },
@@ -363,6 +401,9 @@ def compute_umap(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     metadata = dict(adata.uns.get("scagent_sdk", {}))
     metadata.update({"umap_id": layout_id, "umap_key": actual_key})
     adata.uns["scagent_sdk"] = metadata
+    graph_id = metadata.get("neighbor_graph_id")
+    graph_representation_id = metadata.get("neighbor_graph_representation_id")
+    graph_representation_key = metadata.get("neighbor_graph_representation_key")
     report = {
         "neighbors_key": neighbors_key,
         "umap_key": actual_key,
@@ -371,6 +412,9 @@ def compute_umap(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
         "spread": spread,
         "random_seed": seed,
         "compute_backend": "rapids_singlecell",
+        "neighbor_graph_id": graph_id,
+        "neighbor_graph_representation_id": graph_representation_id,
+        "neighbor_graph_representation_key": graph_representation_key,
     }
     _, artifacts = _publish(
         adata,
@@ -393,6 +437,9 @@ def compute_umap(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
                     "id": layout_id,
                     "key": actual_key,
                     "neighbors_key": neighbors_key,
+                    "neighbor_graph_id": graph_id,
+                    "representation_id": graph_representation_id,
+                    "representation_key": graph_representation_key,
                 },
             }
         },

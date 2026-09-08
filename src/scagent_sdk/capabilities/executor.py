@@ -71,7 +71,7 @@ _BRANCH_ARGUMENT = "branch_from"
 _ADOPT_UNTRACKED_ARGUMENT = "adopt_untracked"
 # How long a forced stop waits for a signalled worker to unwind before giving up on it.
 _WORKER_STOP_SECONDS = 15.0
-_PATH_ARGUMENT_NAMES = frozenset({"cwd", "path"})
+_PATH_ARGUMENT_NAMES = frozenset({"counts_from", "cwd", "path"})
 _PATH_ARGUMENT_SUFFIXES = ("_dir", "_directory", "_file", "_path")
 
 
@@ -336,6 +336,8 @@ class CapabilityExecutor:
             state_facts=deepcopy(self.session.store.state.facts),
             state_lineage=deepcopy(self.session.store.state.lineage),
             artifact_relative_path=artifact_relative_path,
+            state_decisions=deepcopy(self.session.store.state.decisions),
+            skill_version=package.manifest.version,
         )
         resolved_arguments = _resolve_session_paths(arguments, self.session.directory)
         try:

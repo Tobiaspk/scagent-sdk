@@ -219,6 +219,121 @@ def test_labels_only_contract_gets_lightweight_defaults() -> None:
     assert parsed["confidence"] == {}
 
 
+def test_durable_decision_provenance_distinguishes_current_stale_and_unbound() -> None:
+    provenance = _handler().__globals__["_durable_decision_provenance"]
+    analysis = {
+        "cell_set": {"id": "cells-a"},
+        "count_representation": {"id": "counts-a"},
+    }
+    assert "matches" in provenance(
+        {"cell_set_id": "cells-a", "count_representation_id": "counts-a"}, analysis
+    )
+    assert "stale" in provenance({"cell_set_id": "cells-old"}, analysis)
+    assert "unavailable" in provenance({"decision": "integrate"}, analysis)
+
+
+def test_graph_provenance_uses_graph_source_not_latest_embedding() -> None:
+    graph_provenance = _handler().__globals__["_graph_provenance"]
+    adata = SimpleNamespace(uns={"neighbors": {"params": {"use_rep": "X_scVI"}}})
+    result = graph_provenance(
+        {
+            "representation": {
+                "id": "pca-latest",
+                "key": "X_pca",
+                "neighbor_graph_id": "graph-a",
+            }
+        },
+        adata,
+    )
+    assert result == {"neighbor_graph_id": "graph-a", "representation_key": "X_scVI"}
+
+
+def test_summary_cannot_restate_structured_elbo_values() -> None:
+    validate = _handler().__globals__["_validate_summary_metrics"]
+    facts = {"analysis": {"scvi_training": {"final_train_elbo": 12.5}}}
+    with pytest.raises(ValueError, match="must not manually transcribe ELBO"):
+        validate("Final train ELBO 13", facts)
+    validate("The scVI curves stabilized without obvious divergence.", facts)
+
+
+def test_report_recovers_recorded_qc_and_batch_decisions_from_durable_state() -> None:
+    render = _handler().__globals__["_render_report"]
+    row = SimpleNamespace(
+        cluster="0",
+        deg_label="T cell",
+        cell_type="T cell",
+        confidence="high",
+        n_cells=10,
+        override_justification="",
+    )
+
+    class _Table:
+        def __len__(self) -> int:
+            return 1
+
+        def sort_values(self, _key: str) -> Any:
+            return self
+
+        def itertuples(self, *, index: bool) -> list[Any]:
+            assert index is False
+            return [row]
+
+    adata = SimpleNamespace(
+        n_obs=10,
+        n_vars=20,
+        uns={"neighbors": {"params": {"use_rep": "X_scVI"}}},
+    )
+    report = render(
+        summary="Summary.",
+        facts={
+            "analysis": {
+                "cell_set": {"id": "cells-a"},
+                "count_representation": {"id": "counts-a"},
+                "clustering": {"id": "clusters-a", "resolution": 1.0},
+                "scvi_training": {
+                    "epochs_trained": 8,
+                    "max_epochs": 10,
+                    "early_stopping_enabled": True,
+                    "early_stopped": True,
+                    "final_train_elbo": 12.25,
+                    "final_validation_elbo": 12.0,
+                    "best_validation_elbo": 11.5,
+                    "best_validation_epoch": 7,
+                },
+            }
+        },
+        decisions={
+            "cell_qc_handling": {
+                "decision": "keep_all",
+                "rationale": "Reviewed distributions.",
+                "cell_set_id": "cells-a",
+                "count_representation_id": "counts-a",
+            },
+            "batch_handling": {
+                "decision": "integrate",
+                "rationale": "User selected correction.",
+                "cell_set_id": "cells-a",
+                "count_representation_id": "counts-a",
+            },
+        },
+        history=[],
+        path=Path("/tmp/input.zarr"),
+        adata=adata,
+        cluster_key="leiden",
+        label_key="cell_type",
+        clustering_id="clusters-a",
+        table=_Table(),
+        rationales={"0": ""},
+        evidence_summaries={"0": ""},
+        caveats=[],
+    )
+    assert "QC decision: `keep_all`" in report
+    assert "Decision: `integrate`" in report
+    assert report.count("identity binding matches current lineage") == 2
+    assert "Final train ELBO: `12.250000`" in report
+    assert "Best validation ELBO: `11.500000` at epoch `7`" in report
+
+
 # --- envelope assembly ------------------------------------------------------
 
 

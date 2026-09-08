@@ -1,7 +1,8 @@
-"""Deterministic, judgment-free content inspection of an AnnData file.
+"""Deterministic, judgment-free content inspection of an AnnData dataset.
 
 This answers "what is in this dataset" without the model writing exploratory code. It opens the
-file read-only (backed, so a large matrix is never fully loaded), and reports facts only: shape,
+dataset read-only without ever loading the matrix whole -- ``backed="r"`` for ``.h5ad``, and
+``anndata.experimental.read_lazy`` for a ``.zarr`` store -- and reports facts only: shape,
 value characteristics of ``X``/layers/``raw`` sampled safely, per-column ``obs``/``var`` summaries,
 embedding/uns keys, and gene-identifier signals. Roles, species, and "is this counts" verdicts are
 deliberately left to the model, which reads these facts.
@@ -288,11 +289,11 @@ def _render_markdown(sheet: dict[str, Any]) -> str:
         f"# Dataset contents: {Path(sheet['path']).name}",
         "",
         f"- Shape: **{shape['n_obs']:,} cells × {shape['n_vars']:,} genes**"
-        + (" (read backed)" if sheet.get("backed") else ""),
+        + f" (read {sheet.get('read_mode', 'memory')})",
         f"- X: {sheet['X']}",
         f"- Layers: {sheet['layers'] or 'none'}",
         f"- raw: {raw_line}",
-        f"- Embeddings (obsm): {sheet['obsm_keys'] or 'none'}",
+        f"- Embeddings (obsm): {sheet.get('obsm_shapes') or sheet['obsm_keys'] or 'none'}",
         f"- uns keys: {sheet['uns_keys'] or 'none'}",
         f"- Gene-identifier signals: {sheet['gene_namespace']}",
         f"- Gene symbols (MT/ribo, mapping): {sheet['gene_symbols']}",
@@ -320,30 +321,63 @@ def _render_markdown(sheet: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
-    import json
+def _open_dataset(path: Path) -> tuple[Any, str]:
+    """Open an AnnData dataset without materializing its matrix. Returns ``(adata, read_mode)``.
+
+    ``.h5ad`` opens backed. A ``.zarr`` store has no backed mode, so it opens through
+    ``anndata.experimental.read_lazy``, which keeps ``X``/layers as lazy arrays while leaving
+    ``obs``/``var`` addressable. ``read_lazy`` is experimental; if it is unavailable, fail with an
+    actionable dependency error instead of silently materializing a potentially huge store.
+    """
 
     import anndata as ad
+
+    if path.suffix.lower() != ".zarr":
+        return ad.read_h5ad(path, backed="r"), "backed"
+    try:
+        from anndata.experimental import read_lazy
+    except ImportError as exc:
+        raise RuntimeError(
+            "describing a .zarr store requires anndata.experimental.read_lazy so the matrix "
+            "is not loaded whole; update the inspect-dataset compute environment"
+        ) from exc
+    return read_lazy(path), "lazy"
+
+
+def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
+    import json
 
     raw_path = arguments.get("path")
     if not isinstance(raw_path, str) or not raw_path.strip():
         raise ValueError("path must be a non-empty string")
     path = Path(raw_path).expanduser().resolve()
-    if not path.is_file():
-        raise FileNotFoundError(f"dataset file not found: {path}")
-    if path.suffix.lower() != ".h5ad":
-        raise ValueError("describe_dataset supports .h5ad files; use inspect_dataset for identity")
+    # A .zarr store is a directory (ADR 0011), so it fails is_file() -- which is why every
+    # in-session artifact was previously undescribable and the model fell back to custom code.
+    is_zarr = path.suffix.lower() == ".zarr"
+    if not (path.is_dir() if is_zarr else path.is_file()):
+        raise FileNotFoundError(f"dataset not found: {path}")
+    if not is_zarr and path.suffix.lower() != ".h5ad":
+        raise ValueError(
+            "describe_dataset supports .h5ad files and .zarr stores; "
+            "use inspect_dataset for identity"
+        )
     max_values = int(arguments.get("max_values", 10))
     sample_rows = int(arguments.get("sample_rows", 4000))
 
-    adata = ad.read_h5ad(path, backed="r")
+    adata, read_mode = _open_dataset(path)
     n_obs, n_vars = int(adata.n_obs), int(adata.n_vars)
 
-    # Bound matrix value sampling to a small in-memory row block so a backed matrix is never
-    # loaded whole; obs/var are already resident and used at full cardinality.
+    # obs/var are scanned at full cardinality. A lazily-opened store hands them back as xarray
+    # Dataset2D, whose columns are DataArrays without pandas' dropna/nunique/isna -- so they are
+    # materialized here. This reads annotations only, never the matrix.
+    obs_frame = adata.obs.to_memory() if read_mode == "lazy" else adata.obs
+    var_frame = adata.var.to_memory() if read_mode == "lazy" else adata.var
+
+    # Bound matrix value sampling to a small in-memory row block so the matrix is never loaded
+    # whole. A lazy store reports isbacked False, so the mode -- not that flag -- decides.
     rows = min(sample_rows, n_obs)
     block = adata[:rows]
-    if getattr(adata, "isbacked", False):
+    if read_mode != "memory":
         block = block.to_memory()
 
     layer_names = list(adata.layers.keys())
@@ -357,7 +391,9 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     var_names = [str(name) for name in adata.var_names]
     sheet: dict[str, Any] = {
         "path": str(path),
+        # Keep AnnData's actual backed semantics. Zarr's lazy mode is separately explicit below.
         "backed": bool(getattr(adata, "isbacked", False)),
+        "read_mode": read_mode,
         "shape": {"n_obs": n_obs, "n_vars": n_vars},
         "matrix_sample_rows": int(rows),
         "X": x_facts,
@@ -369,21 +405,27 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
             "X": _matrix_facts(block.raw.X) if raw_present and block.raw is not None else {},
         },
         "obsm_keys": list(adata.obsm.keys()),
+        # Shapes, not just names: "X_scVI exists" does not say whether it is 30- or 50-dimensional,
+        # which is what decides whether a downstream step can run from this artifact.
+        "obsm_shapes": {
+            str(key): [int(dim) for dim in getattr(adata.obsm[key], "shape", ())]
+            for key in adata.obsm
+        },
         "varm_keys": list(adata.varm.keys()),
         "obsp_keys": list(adata.obsp.keys()),
         "uns_keys": uns_keys,
         "obs_columns": {
-            col: _column_facts(adata.obs[col], n_obs, max_values=max_values)
-            for col in adata.obs.columns
+            col: _column_facts(obs_frame[col], n_obs, max_values=max_values)
+            for col in obs_frame.columns
         },
         "var_columns": {
-            col: _column_facts(adata.var[col], n_vars, max_values=max_values)
-            for col in adata.var.columns
+            col: _column_facts(var_frame[col], n_vars, max_values=max_values)
+            for col in var_frame.columns
         },
         "var_names_examples": var_names[:12],
         "obs_names_examples": [str(name) for name in adata.obs_names[:8]],
         "gene_namespace": _gene_namespace_facts(var_names),
-        "gene_symbols": _gene_symbol_facts(var_names, adata.var),
+        "gene_symbols": _gene_symbol_facts(var_names, var_frame),
         "obs_names": _obs_names_facts([str(name) for name in adata.obs_names[:50]]),
     }
     sheet["matrix_signals"] = _matrix_signals(x_facts, uns_keys, var_columns)

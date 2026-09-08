@@ -1,7 +1,7 @@
 schema_version: 1
 skill:
   id: single-cell-clustering
-  version: "0.3.0"
+  version: "0.4.0"
   description: Independent Leiden clustering and group-wise gene ranking.
 tools:
   - name: cluster_single_cells

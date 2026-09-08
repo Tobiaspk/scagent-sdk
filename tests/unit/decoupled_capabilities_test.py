@@ -122,6 +122,14 @@ def test_reclustering_does_not_erase_batch_evidence() -> None:
     assert '"batch": None' not in source
 
 
+def test_representation_building_does_not_erase_batch_evidence() -> None:
+    source = (
+        Path(__file__).parents[2]
+        / ".claude/skills/dimensionality-reduction/scripts/reduce.py"
+    ).read_text(encoding="utf-8")
+    assert '"batch": None' not in source
+
+
 def test_evidence_generation_is_portable_but_decisions_remain_bound() -> None:
     packages = _packages()
     expected = {

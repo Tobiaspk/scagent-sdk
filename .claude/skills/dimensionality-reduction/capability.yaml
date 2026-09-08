@@ -1,7 +1,7 @@
 schema_version: 1
 skill:
   id: dimensionality-reduction
-  version: "0.2.0"
+  version: "0.3.0"
   description: Independent PCA, neighbor-graph, and UMAP transformations.
 tools:
   - name: compute_single_cell_pca

@@ -26,7 +26,11 @@ from an already processed artifact, and the observed data may require replanning
    debris), for a user- or source-specified protocol, or when debris would dominate the embedding —
    and then review *before* filtering, state the threshold and the exact count removed, and
    recalculate and review QC on the retained artifact. Keep doublet-flagged cells in the object;
-   their distribution across clusters is the evidence. Gene-level low-detection filtering is a
+   their distribution across clusters is the evidence. Before leaving this early QC phase in a
+   comprehensive run, notice whether applicable doublet evidence is still missing: run it, or
+   state why it is being deferred or omitted so the omission is not discovered only during
+   reporting. This is an intent-aware planning reminder, not a runtime gate and not a requirement
+   for a focused request such as “run scVI on this dataset.” Gene-level low-detection filtering is a
    separate, ordinary preprocessing step and is not deferred.
 3. Normalize, select HVGs, compute PCA, inspect the PCA variance figure, build neighbors, compute
    UMAP, and call `plot_qc_embedding`. Explain where quality signals localize; distributions alone
@@ -52,7 +56,10 @@ from an already processed artifact, and the observed data may require replanning
    into annotation.
 5. With a clean exploratory representation, investigate batch structure when meaningful batch
    metadata exists. Use the bounded profile-nomination investigation, present its compact evidence
-   to the user, and stop for an explicit handling choice before recording a decision. Record
+   to the user, and stop for an explicit handling choice before recording a decision. When an
+   uncorrected UMAP already exists, normally add a sample-colored view as advisory context and
+   retain its artifact identity; do not treat that view alone as causal evidence or build an
+   otherwise-unneeded UMAP merely to complete a sequence. Record
    `not_applicable` when no defensible batch unit exists. Investigate batch **once**, on the
    uncorrected pass — it is the expensive gene-first diagnostic and answers only *whether* to
    integrate. If integration is chosen, rebuild the neighbors/UMAP from the integrated

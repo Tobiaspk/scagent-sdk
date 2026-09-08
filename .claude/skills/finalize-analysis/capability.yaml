@@ -1,11 +1,11 @@
 schema_version: 1
 skill:
   id: finalize-analysis
-  version: "0.5.0"
+  version: "0.6.0"
   description: Publish a complete cluster-to-label mapping and final annotated artifact.
 tools:
   - name: finalize_analysis
-    description: Validate complete cluster labels, save a final annotated AnnData and report, and mark the scientific session finalized. QC, batch, and reference reviews are useful context rather than prerequisites.
+    description: Validate complete cluster labels, save a final annotated AnnData and report, and mark the scientific session finalized. QC, batch, and reference evidence are not mandatory prerequisites; if cluster QC exists for the published clustering, its exact evidence must have a resolved review.
     entrypoint: scripts/finalize.py:run
     environment: gpu-singlecell
     activity_label: Finalizing analysis
@@ -48,6 +48,7 @@ tools:
           type: string
           minLength: 1
           default: Finalized cluster annotation.
+          description: Narrative interpretation. Do not manually transcribe ELBO values; exact structured scVI diagnostics are rendered automatically.
         caveats:
           type: array
           items: {type: string}

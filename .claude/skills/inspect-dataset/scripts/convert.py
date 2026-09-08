@@ -136,16 +136,19 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     if not isinstance(raw_path, str) or not raw_path.strip():
         raise ValueError("path must be a non-empty string")
     path = Path(raw_path).expanduser().resolve()
-    if not path.is_file():
-        raise FileNotFoundError(f"dataset file not found: {path}")
-    if path.suffix.lower() != ".h5ad":
-        raise ValueError("convert_gene_ids supports .h5ad files")
+    is_zarr = path.suffix.lower() == ".zarr"
+    if not (path.is_dir() if is_zarr else path.is_file()):
+        raise FileNotFoundError(f"dataset not found: {path}")
+    if not is_zarr and path.suffix.lower() != ".h5ad":
+        raise ValueError("convert_gene_ids supports .h5ad files and .zarr stores")
 
     use_mygene = bool(arguments.get("use_mygene", False))
     normalize_case = bool(arguments.get("normalize_case", False))
     organism = str(arguments.get("organism", "auto")).strip().lower()
 
-    adata = ad.read_h5ad(path)
+    # Conversion rewrites every var name and saves a new object, so the input is read whole;
+    # a lazy open would buy nothing here.
+    adata = ad.read_zarr(path) if is_zarr else ad.read_h5ad(path)
     original = [str(name) for name in adata.var_names]
     if organism in {"", "auto"}:
         organism = _infer_organism(original)

@@ -78,11 +78,43 @@ def interpret_mixing(entropy_mean: float) -> str:
     return "Poor mixing — strong batch structure persists; check the batch key or method."
 
 
+def interpret_integration(entropy_mean: float, baseline: dict[str, Any] | None) -> str:
+    """Interpret corrected mixing only when the required improvement comparison exists."""
+
+    if baseline is None:
+        return "Corrected mixing measured; improvement is unknown without an X_pca baseline."
+    level = interpret_mixing(entropy_mean).split(" — ", 1)[0]
+    change = entropy_mean - float(baseline["entropy_mean"])
+    return f"{level} corrected mixing; change versus X_pca baseline {change:+.4f}."
+
+
 def _read_matrix(path):
     """Read an AnnData artifact, tolerating both .h5ad files and .zarr stores (ADR 0011)."""
     import anndata as ad
 
     return ad.read_zarr(path) if str(path).endswith(".zarr") else ad.read_h5ad(path)
+
+
+def _aligned_baseline(corrected_adata: Any, baseline_adata: Any, batch_key: str) -> Any:
+    """Align a separate baseline by cell identity and verify the batch labels agree."""
+
+    if not corrected_adata.obs_names.is_unique or not baseline_adata.obs_names.is_unique:
+        raise ValueError("corrected and baseline cell names must be unique")
+    corrected_cells = set(map(str, corrected_adata.obs_names))
+    baseline_cells = set(map(str, baseline_adata.obs_names))
+    if corrected_cells != baseline_cells:
+        raise ValueError(
+            "baseline and corrected artifacts do not contain exactly the same cells; "
+            f"corrected={len(corrected_cells):,}, baseline={len(baseline_cells):,}"
+        )
+    if batch_key not in baseline_adata.obs:
+        raise ValueError(f"batch key {batch_key!r} is absent from the baseline artifact")
+    aligned = baseline_adata[corrected_adata.obs_names].copy()
+    corrected_labels = corrected_adata.obs[batch_key].astype(str).to_numpy()
+    baseline_labels = aligned.obs[batch_key].astype(str).to_numpy()
+    if not np.array_equal(corrected_labels, baseline_labels):
+        raise ValueError("baseline and corrected batch labels disagree for the same cells")
+    return aligned
 
 
 def _score_representation(
@@ -137,14 +169,24 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     corrected = _score_representation(
         adata, corrected_rep, batch_codes, n_batches, unique_batches, n_neighbors
     )
+    baseline_path_arg = arguments.get("baseline_path")
+    baseline_path = (
+        Path(str(baseline_path_arg)).expanduser().resolve()
+        if baseline_path_arg is not None
+        else None
+    )
+    baseline_adata = adata
+    if baseline_path is not None:
+        baseline_adata = _aligned_baseline(adata, _read_matrix(baseline_path), str(batch_key))
     baseline = _score_representation(
-        adata, BASELINE_REP, batch_codes, n_batches, unique_batches, n_neighbors
+        baseline_adata, BASELINE_REP, batch_codes, n_batches, unique_batches, n_neighbors
     )
 
     corrected_mean = corrected["entropy_mean"]
     improvement = (
         round(corrected_mean - baseline["entropy_mean"], 4) if baseline is not None else None
     )
+    comparison_complete = baseline is not None
     score = {
         "schema_version": 1,
         "batch_key": str(batch_key),
@@ -152,8 +194,11 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
         "n_neighbors": min(n_neighbors, adata.n_obs - 1),
         "corrected": corrected,
         "baseline": baseline,
+        "baseline_path": str(baseline_path) if baseline_path is not None else None,
+        "comparison_status": "complete" if comparison_complete else "incomplete",
         "mixing_improvement": improvement,
-        "interpretation": interpret_mixing(corrected_mean),
+        "corrected_only_interpretation": interpret_mixing(corrected_mean),
+        "interpretation": interpret_integration(corrected_mean, baseline),
         "note": (
             "Neighborhood batch-mixing entropy in [0,1] (1 = perfectly mixed). Corrected and "
             "baseline are scored on comparable latent spaces; this describes mixing only and is "
@@ -167,8 +212,8 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     if improvement is None:
         summary = (
             f"Scored {corrected_rep} mixing on {batch_key!r}: mean neighborhood batch entropy "
-            f"{corrected_mean:.3f} ({score['interpretation'].split(' — ')[0]}); "
-            f"no {BASELINE_REP} baseline present to compare against."
+            f"{corrected_mean:.3f}; no {BASELINE_REP} baseline was available, so correction "
+            "improvement remains unknown."
         )
     else:
         summary = (

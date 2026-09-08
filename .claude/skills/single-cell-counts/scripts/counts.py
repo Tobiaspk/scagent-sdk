@@ -99,13 +99,21 @@ def _count_matrix_identity(matrix: Any, obs_names: Any, var_names: Any) -> str:
 
 
 def _read(path: Path, sc: Any) -> Any:
+    # A .zarr artifact is a directory too (ADR 0011), so it must be matched before the generic
+    # directory branch. Otherwise every in-session artifact is handed to the 10x Matrix Market
+    # reader, which fails hunting for a matrix.mtx that was never there -- leaving the original
+    # input file as the only way to materialize counts, which resets the analysis lineage.
+    if path.suffix.lower() == ".zarr":
+        return _read_matrix(path)
     if path.is_dir():
         return sc.read_10x_mtx(path, var_names="gene_symbols", cache=False)
     if path.suffix.lower() == ".h5ad":
         return _read_matrix(path)
     if path.suffix.lower() in {".h5", ".hdf5"}:
         return sc.read_10x_h5(path)
-    raise ValueError("supported inputs are H5AD, 10x H5, or a 10x Matrix Market directory")
+    raise ValueError(
+        "supported inputs are H5AD, a .zarr store, 10x H5, or a 10x Matrix Market directory"
+    )
 
 
 def _stored_values(matrix: Any) -> Any:
@@ -204,6 +212,77 @@ def _candidate_sources(adata: Any) -> tuple[dict[str, Any], bool, bool]:
     return candidates, raw_present, raw_usable
 
 
+def _align_count_source(source: Any, target: Any) -> Any:
+    """Return ``source`` in target order, refusing any cell/gene identity mismatch."""
+
+    for label, names in (
+        ("count-source cells", source.obs_names),
+        ("count-source genes", source.var_names),
+        ("target cells", target.obs_names),
+        ("target genes", target.var_names),
+    ):
+        if not names.is_unique:
+            raise ValueError(f"{label} are not unique; cannot attach counts safely")
+    source_cells = set(map(str, source.obs_names))
+    target_cells = set(map(str, target.obs_names))
+    source_genes = set(map(str, source.var_names))
+    target_genes = set(map(str, target.var_names))
+    if source_cells != target_cells:
+        raise ValueError(
+            "count source and target do not contain exactly the same cells; "
+            f"source={len(source_cells):,}, target={len(target_cells):,}"
+        )
+    if source_genes != target_genes:
+        raise ValueError(
+            "count source and target do not contain exactly the same genes; "
+            f"source={len(source_genes):,}, target={len(target_genes):,}"
+        )
+    return source[target.obs_names, target.var_names].copy()
+
+
+def _count_facts_patch(
+    *,
+    revision_id: str,
+    source_path: str,
+    counts_source_path: str,
+    n_cells: int,
+    n_genes: int,
+    cell_set_id: str,
+    count_id: str,
+    matrix_id: str,
+    selected: str,
+    attachment_mode: bool,
+) -> dict[str, Any]:
+    analysis = {
+        "dataset_revision": {
+            "id": revision_id,
+            "source_path": source_path,
+            "counts_source_path": counts_source_path,
+            "n_cells": n_cells,
+            "n_genes": n_genes,
+        },
+        "cell_set": {"id": cell_set_id, "n_cells": n_cells},
+        "count_representation": {
+            "id": count_id,
+            "matrix_id": matrix_id,
+            "method": "validated-source-counts",
+            "count_source": selected,
+            "source_layer": "counts",
+        },
+    }
+    if attachment_mode:
+        return {"analysis": analysis}
+    analysis.update({"representation": None, "clustering": None})
+    return {
+        "analysis": analysis,
+        "cell_qc": None,
+        "batch": None,
+        "cluster_qc": None,
+        "annotation": None,
+        "finalization": None,
+    }
+
+
 def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     import scanpy as sc
 
@@ -213,12 +292,25 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     source = str(arguments.get("counts_source", "auto"))
     layer_arg = arguments.get("counts_layer")
     layer = str(layer_arg) if layer_arg is not None else None
+    counts_from_arg = arguments.get("counts_from")
+    counts_from = (
+        Path(str(counts_from_arg)).expanduser().resolve()
+        if counts_from_arg is not None
+        else None
+    )
 
     adata = _read(path, sc)
     adata.var_names_make_unique()
     if adata.n_obs == 0 or adata.n_vars == 0:
         raise ValueError("the input matrix has zero cells or zero genes")
-    candidates, raw_present, raw_usable = _candidate_sources(adata)
+    count_source_adata = adata
+    if counts_from is not None:
+        if not counts_from.exists():
+            raise FileNotFoundError(counts_from)
+        raw_source = _read(counts_from, sc)
+        raw_source.var_names_make_unique()
+        count_source_adata = _align_count_source(raw_source, adata)
+    candidates, raw_present, raw_usable = _candidate_sources(count_source_adata)
     inspections = {name: _inspect_matrix(matrix) for name, matrix in candidates.items()}
     selected, reason = _choose_count_source(
         inspections, counts_source=source, counts_layer=layer
@@ -227,11 +319,16 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     # then one more so X and the counts layer stay independent objects. The third copy the
     # previous version made was pure overhead.
     counts = candidates[selected].copy()
-    adata.X = counts
+    if counts_from is None:
+        adata.X = counts
     adata.layers["counts"] = counts.copy()
 
-    dropped_payload = _redundant_payload(
-        selected, layer_names=list(adata.layers.keys()), raw_present=raw_present
+    dropped_payload = (
+        _redundant_payload(
+            selected, layer_names=list(adata.layers.keys()), raw_present=raw_present
+        )
+        if counts_from is None
+        else []
     )
     for item in dropped_payload:
         if item == "raw":
@@ -239,21 +336,48 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
         else:
             del adata.layers[item.split(":", 1)[1]]
 
-    cell_set_id = _identity("cells", sorted(map(str, adata.obs_names)))
-    matrix_id = _count_matrix_identity(counts, adata.obs_names, adata.var_names)
-    count_id = _identity(
-        "count-representation",
-        {"matrix_id": matrix_id, "cell_set_id": cell_set_id, "selected_source": selected},
+    metadata = dict(adata.uns.get("scagent_sdk", {}))
+    computed_cell_set_id = _identity("cells", sorted(map(str, adata.obs_names)))
+    recorded_cell_set_id = metadata.get("cell_set_id")
+    cell_set_id = (
+        recorded_cell_set_id
+        if counts_from is not None and isinstance(recorded_cell_set_id, str)
+        else computed_cell_set_id
     )
+    matrix_id = _count_matrix_identity(counts, adata.obs_names, adata.var_names)
+    existing_count_id = metadata.get("count_representation_id")
+    existing_matrix_id = metadata.get("count_matrix_id")
+    existing_cell_set_id = metadata.get("cell_set_id")
+    if (
+        isinstance(existing_count_id, str)
+        and existing_matrix_id == matrix_id
+        and existing_cell_set_id == cell_set_id
+    ):
+        count_id = existing_count_id
+    else:
+        count_id = _identity(
+            "count-representation",
+            {
+                "matrix_id": matrix_id,
+                "cell_set_id": cell_set_id,
+                "selected_source": selected,
+                "counts_from": str(counts_from) if counts_from is not None else None,
+            },
+        )
     revision_id = _identity(
         "dataset-revision",
-        {"input_path": str(path), "cell_set_id": cell_set_id, "count_id": count_id},
+        {
+            "input_path": str(path),
+            "counts_from": str(counts_from) if counts_from is not None else None,
+            "cell_set_id": cell_set_id,
+            "count_id": count_id,
+        },
     )
-    metadata = dict(adata.uns.get("scagent_sdk", {}))
     metadata.update(
         {
             "schema_version": 1,
-            "source_path": str(path),
+            "source_path": metadata.get("source_path", str(path)),
+            "counts_source_path": str(counts_from or path),
             "dataset_revision_id": revision_id,
             "cell_set_id": cell_set_id,
             "count_representation_id": count_id,
@@ -268,6 +392,9 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     report = {
         "requested_source": source,
         "requested_layer": layer,
+        "target_path": str(path),
+        "counts_from": str(counts_from) if counts_from is not None else None,
+        "attachment_mode": counts_from is not None,
         "selected_source": selected,
         "selection_reason": reason,
         "raw_present": raw_present,
@@ -289,8 +416,13 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     )
     return {
         "summary": (
-            f"Materialized {selected} as raw counts for "
-            f"{adata.n_obs:,} cells × {adata.n_vars:,} genes."
+            (
+                f"Attached {selected} from {counts_from} as layers['counts'] while preserving "
+                "the target expression, embeddings, graphs, and annotations for "
+                if counts_from is not None
+                else f"Materialized {selected} as raw counts for "
+            )
+            + f"{adata.n_obs:,} cells × {adata.n_vars:,} genes."
             + (
                 f" Dropped redundant {', '.join(dropped_payload)} from the artifact; "
                 "the source file retains them."
@@ -299,31 +431,18 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
             )
         ),
         "details": report,
-        "facts_patch": {
-            "analysis": {
-                "dataset_revision": {
-                    "id": revision_id,
-                    "source_path": str(path),
-                    "n_cells": int(adata.n_obs),
-                    "n_genes": int(adata.n_vars),
-                },
-                "cell_set": {"id": cell_set_id, "n_cells": int(adata.n_obs)},
-                "count_representation": {
-                    "id": count_id,
-                    "matrix_id": matrix_id,
-                    "method": "validated-source-counts",
-                    "count_source": selected,
-                    "source_layer": "counts",
-                },
-                "representation": None,
-                "clustering": None,
-            },
-            "cell_qc": None,
-            "batch": None,
-            "cluster_qc": None,
-            "annotation": None,
-            "finalization": None,
-        },
+        "facts_patch": _count_facts_patch(
+            revision_id=revision_id,
+            source_path=str(metadata.get("source_path", path)),
+            counts_source_path=str(counts_from or path),
+            n_cells=int(adata.n_obs),
+            n_genes=int(adata.n_vars),
+            cell_set_id=cell_set_id,
+            count_id=count_id,
+            matrix_id=matrix_id,
+            selected=selected,
+            attachment_mode=counts_from is not None,
+        ),
         "artifacts": [
             {
                 "name": "count-ready-anndata",

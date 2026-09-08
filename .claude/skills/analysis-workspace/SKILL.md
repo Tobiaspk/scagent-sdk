@@ -42,4 +42,10 @@ Use explicit paths, deterministic seeds, non-overwriting outputs, and
 `register_artifact(path, name, media_type)` for durable results. Custom artifacts do not
 automatically become validated annotation or publication evidence.
 
+Your code runs with `np`, `pd`, `sc`, `ad`, `plt`, `Path`, `register_artifact`, `session_dir`, and
+`workspace` already bound. `workspace` is a `Path` to this execution's staging directory: write
+anything you intend to keep underneath it and register it from there. `register_artifact` refuses a
+path outside `workspace`, so writing elsewhere first and registering afterwards always fails -- do
+not go hunting for the staging path, it is already in scope.
+
 Read [references/custom-code.md](references/custom-code.md).

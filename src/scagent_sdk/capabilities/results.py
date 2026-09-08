@@ -60,6 +60,13 @@ class CapabilityContext:
     # ``capability_artifact_directory_name``), so a hand-built ``artifacts/capabilities/<id>/…``
     # path points at a directory that does not exist and every later resolve-by-path fails.
     artifact_relative_path: str = ""
+    # Durable user/scientist decisions are session-scoped and can outlive the node-scoped fact
+    # snapshot on the active artifact. Reporting capabilities need this read-only view so they can
+    # distinguish "not recorded" from "recorded on another lineage / no longer current".
+    state_decisions: dict[str, Any] = field(default_factory=dict)
+    # Manifest version of the executing skill. Report/recipe generators must use this value rather
+    # than a hand-maintained literal that can drift from capability.yaml.
+    skill_version: str = ""
 
 
 @dataclass(frozen=True)

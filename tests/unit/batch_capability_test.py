@@ -33,7 +33,7 @@ def _g(name: str) -> Any:
 
 def test_manifest_splits_evidence_and_decision_tools() -> None:
     package = _package()
-    assert package.manifest.version == "0.9.0"
+    assert package.manifest.version == "0.9.1"
     names = {tool.name for tool in package.manifest.tools}
     assert names == {"investigate_batch", "decide_batch_handling"}
     evidence = next(t for t in package.manifest.tools if t.name == "investigate_batch")
@@ -250,6 +250,7 @@ def test_decision_persists_only_choice_rationale_and_evidence_id(tmp_path: Path)
     assert result["decisions_patch"] == {
         "batch_handling": {
             "decision": "integrate",
+            "evidence_id": "batch-evidence:e1",
             "rationale": "The user selected a shared corrected representation.",
         }
     }

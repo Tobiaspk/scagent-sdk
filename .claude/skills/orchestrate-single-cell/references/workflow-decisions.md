@@ -94,6 +94,10 @@ decision is current only for the cell/count/representation/clustering identities
 
 For many batches, prefer readable heatmaps or bounded legends and always retain the underlying
 tables. Do not claim visual separation from an artifact whose labels cannot be read.
+When an uncorrected UMAP already exists, normally plot it by the meaningful sample/batch key during
+the investigation and keep its artifact identity with the explanation. Treat that view as advisory
+context only: it localizes separation but cannot determine technical versus biological cause. Do
+not build an otherwise-unneeded UMAP merely to complete a fixed sequence.
 
 ## Annotation
 

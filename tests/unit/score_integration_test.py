@@ -37,6 +37,7 @@ def test_manifest_exposes_score_integration_read_only() -> None:
     # primary_matrix_input must be omittable (resolved to the lineage head by the executor).
     assert "path" not in tool.input_schema.get("required", [])
     assert tool.primary_matrix_input == "path"
+    assert "baseline_path" in tool.input_schema["properties"]
 
 
 def test_perfectly_mixed_neighbourhood_scores_near_one() -> None:
@@ -61,3 +62,13 @@ def test_interpret_mixing_thresholds() -> None:
     assert interpret(0.65).startswith("Good")
     assert interpret(0.5).startswith("Moderate")
     assert interpret(0.2).startswith("Poor")
+
+
+def test_missing_baseline_does_not_claim_good_integration() -> None:
+    interpret = _score_globals()["interpret_integration"]
+    incomplete = interpret(0.9, None)
+    assert "improvement is unknown" in incomplete
+    assert "Excellent" not in incomplete
+    complete = interpret(0.9, {"entropy_mean": 0.2})
+    assert complete.startswith("Excellent")
+    assert "change versus X_pca baseline +0.7000" in complete

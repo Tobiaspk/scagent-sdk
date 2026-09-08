@@ -1,7 +1,7 @@
 schema_version: 1
 skill:
   id: batch-investigation
-  version: "0.9.0"
+  version: "0.9.1"
   description: Gene-first batch evidence followed by one concise, evidence-bound handling choice.
 tools:
   - name: investigate_batch

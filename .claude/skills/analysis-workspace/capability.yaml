@@ -1,7 +1,7 @@
 schema_version: 1
 skill:
   id: analysis-workspace
-  version: "0.2.0"
+  version: "0.2.1"
   description: Auditable filesystem inspection, general shell execution, and custom scientific Python.
 tools:
   - name: list_workspace
@@ -41,7 +41,7 @@ tools:
       required: [command]
       additionalProperties: false
   - name: run_analysis_code
-    description: Execute saved custom scientific Python in the trusted Iris scientific environment and register generated artifacts; this is auditable in-process execution, not a security sandbox.
+    description: "Execute saved custom scientific Python in the trusted Iris scientific environment and register generated artifacts; this is auditable in-process execution, not a security sandbox. Injected names: np, pd, sc, ad, plt, Path, workspace (a Path to this execution's staging directory), session_dir, register_artifact. Write every output you intend to keep under `workspace` and register it from there - register_artifact rejects a path outside it."
     entrypoint: scripts/run_code.py:run
     environment: gpu-singlecell
     activity_label: Running code

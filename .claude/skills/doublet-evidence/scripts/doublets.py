@@ -841,10 +841,7 @@ def run_review(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
             "doublets": {"evidence": None, "review": review},
         }
         decisions_patch = {
-            "doublet_handling": {
-                "decision": review["decision"],
-                "rationale": review["rationale"],
-            },
+            "doublet_handling": dict(review),
             "batch_handling": None,
             "integration": None,
             "final_labels": None,
@@ -856,10 +853,7 @@ def run_review(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     else:
         facts_patch = {"doublets": {"review": review}}
         decisions_patch = {
-            "doublet_handling": {
-                "decision": review["decision"],
-                "rationale": review["rationale"],
-            }
+            "doublet_handling": dict(review)
         }
         summary = (
             f"Recorded doublet review decision {review['decision']!r}; no cells were removed."

@@ -50,6 +50,54 @@ def _load(arguments: dict[str, Any]) -> tuple[Path, Any]:
     return path, _read_matrix(path)
 
 
+def _neighbor_graph_source(
+    adata: Any, metadata: dict[str, Any], path: Path, neighbors_key: str
+) -> tuple[Any, str, Any]:
+    """Resolve the graph's source representation, not whichever embedding was added last."""
+
+    neighbor_graph_id = metadata.get("neighbor_graph_id")
+    neighbors_metadata = adata.uns.get(neighbors_key, {})
+    neighbors_params = (
+        neighbors_metadata.get("params", {})
+        if isinstance(neighbors_metadata, dict)
+        else {}
+    )
+    representation_key = (
+        metadata.get("neighbor_graph_representation_key")
+        or (neighbors_params.get("use_rep") if isinstance(neighbors_params, dict) else None)
+    )
+    representations = metadata.get("representations", {})
+    registered = (
+        representations.get(representation_key)
+        if isinstance(representations, dict) and representation_key
+        else None
+    )
+    representation_id = metadata.get("neighbor_graph_representation_id")
+    if not representation_id and isinstance(registered, dict):
+        representation_id = registered.get("id")
+    if (
+        not representation_id
+        and representation_key
+        and metadata.get("representation_key") == representation_key
+    ):
+        representation_id = metadata.get("representation_id")
+    if not representation_id:
+        representation_id = _identity(
+            "representation",
+            {
+                "input_path": str(path),
+                "neighbors_key": neighbors_key,
+                "representation_key": representation_key,
+                "shape": (
+                    list(map(int, adata.obsm[representation_key].shape))
+                    if representation_key in adata.obsm
+                    else None
+                ),
+            },
+        )
+    return neighbor_graph_id, str(representation_id), representation_key
+
+
 def cluster_cells(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     import rapids_singlecell as rsc
 
@@ -85,12 +133,9 @@ def cluster_cells(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     _to_cpu(adata)
     labels = adata.obs[cluster_key].astype(str)
     metadata = dict(adata.uns.get("scagent_sdk", {}))
-    representation_id = metadata.get("representation_id") or metadata.get("neighbor_graph_id")
-    if not representation_id:
-        representation_id = _identity(
-            "representation",
-            {"input_path": str(path), "neighbors_key": neighbors_key},
-        )
+    neighbor_graph_id, representation_id, representation_key = _neighbor_graph_source(
+        adata, metadata, path, neighbors_key
+    )
     cell_set_id = metadata.get("cell_set_id") or _identity(
         "cells", sorted(map(str, adata.obs_names))
     )
@@ -98,6 +143,7 @@ def cluster_cells(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
         "clustering",
         {
             "representation_id": representation_id,
+            "neighbor_graph_id": neighbor_graph_id,
             "cell_set_id": cell_set_id,
             "cluster_key": cluster_key,
             "resolution": resolution,
@@ -111,10 +157,12 @@ def cluster_cells(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     metadata.update(
         {
             "cell_set_id": cell_set_id,
-            "representation_id": representation_id,
             "clustering_id": clustering_id,
             "compute_backend": "rapids_singlecell",
             "clustering_key": cluster_key,
+            "clustering_neighbor_graph_id": neighbor_graph_id,
+            "clustering_representation_id": representation_id,
+            "clustering_representation_key": representation_key,
         }
     )
     adata.uns["scagent_sdk"] = metadata
@@ -137,6 +185,9 @@ def cluster_cells(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
             "n_clusters": int(sizes.size),
             "cluster_sizes": {str(key): int(value) for key, value in sizes.items()},
             "clustering_id": clustering_id,
+            "neighbor_graph_id": neighbor_graph_id,
+            "representation_id": representation_id,
+            "representation_key": representation_key,
             "compute_backend": "rapids_singlecell",
         },
         "facts_patch": {
@@ -146,12 +197,19 @@ def cluster_cells(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
                     "n_genes": int(adata.n_vars),
                 },
                 "cell_set": {"id": cell_set_id, "n_cells": int(adata.n_obs)},
-                "representation": {"id": representation_id},
+                "representation": {
+                    "neighbor_graph_id": neighbor_graph_id,
+                    "neighbor_graph_representation_id": representation_id,
+                    "neighbor_graph_representation_key": representation_key,
+                },
                 "clustering": {
                     "id": clustering_id,
                     "key": cluster_key,
                     "resolution": resolution,
                     "n_clusters": int(sizes.size),
+                    "neighbor_graph_id": neighbor_graph_id,
+                    "representation_id": representation_id,
+                    "representation_key": representation_key,
                 },
             },
             "cluster_qc": None,

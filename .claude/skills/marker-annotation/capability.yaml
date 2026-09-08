@@ -1,7 +1,7 @@
 schema_version: 1
 skill:
   id: marker-annotation
-  version: "0.5.0"
+  version: "0.5.1"
   description: Transparent cluster DEG/marker evidence and evidence-bound annotation review.
 tools:
   - name: evaluate_marker_evidence

@@ -43,19 +43,38 @@ def _identity(kind: str, value: Any) -> str:
     return f"{kind}:sha256:{hashlib.sha256(encoded).hexdigest()}"
 
 
-def _count_matrix(adata: Any, layer: str) -> Any:
+def _resolve_layer(adata: Any, layer: str | None) -> str | None:
+    """Resolve ``counts_layer``; mirrors ``single-cell-qc``'s helper so the two agree.
+
+    ``auto`` prefers ``layers["counts"]`` and otherwise falls back to ``X``, which is where the
+    counts live in a dataset that was never passed through ``materialize_count_matrix``. An
+    explicitly named layer is never silently substituted -- if it is absent, that is an error.
+    """
+
+    if layer == "auto":
+        return "counts" if "counts" in adata.layers else None
+    return layer
+
+
+def _count_matrix(adata: Any, layer: str | None) -> Any:
     import numpy as np
 
-    if layer not in adata.layers:
-        raise ValueError(f"raw-count layer {layer!r} is absent")
-    matrix = adata.layers[layer]
+    layer = _resolve_layer(adata, layer)
+    if layer is None:
+        matrix = adata.X
+        label = "X"
+    elif layer in adata.layers:
+        matrix = adata.layers[layer]
+        label = f"layer:{layer}"
+    else:
+        raise ValueError(f"raw-count layer {layer!r} is absent; use counts_layer=null for X")
     values = np.asarray(matrix.tocsr().data if hasattr(matrix, "tocsr") else matrix).ravel()
     if values.size and (
         not bool(np.all(np.isfinite(values)))
         or not bool(np.all(values >= 0))
         or not bool(np.all(values == np.round(values)))
     ):
-        raise ValueError(f"layer {layer!r} is not finite nonnegative integer counts")
+        raise ValueError(f"{label} is not finite nonnegative integer counts")
     return matrix
 
 
@@ -65,9 +84,12 @@ def normalize_expression(arguments: dict[str, Any], context: Any) -> dict[str, A
     path = Path(str(arguments["path"])).expanduser().resolve()
     if not path.exists():
         raise FileNotFoundError(path)
-    layer = str(arguments.get("counts_layer", "counts"))
+    layer_arg = arguments.get("counts_layer", "auto")
+    layer = str(layer_arg) if layer_arg is not None else None
     target_sum = float(arguments.get("target_sum", 10000))
     adata = _read_matrix(path)
+    layer = _resolve_layer(adata, layer)
+    source_label = "X" if layer is None else f"layer {layer!r}"
     adata.X = _count_matrix(adata, layer).copy()
     _to_gpu(adata)
     rsc.pp.normalize_total(adata, target_sum=target_sum)
@@ -111,7 +133,7 @@ def normalize_expression(arguments: dict[str, Any], context: Any) -> dict[str, A
     )
     return {
         "summary": (
-            f"Normalized and log1p-transformed {adata.n_obs:,} cells from layer {layer!r}; "
+            f"Normalized and log1p-transformed {adata.n_obs:,} cells from {source_label}; "
             "no cells or genes were removed."
         ),
         "details": report,

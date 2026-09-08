@@ -507,6 +507,8 @@ print(json.dumps({{
                 "state_facts": context.state_facts,
                 "state_lineage": context.state_lineage,
                 "artifact_relative_path": context.artifact_relative_path,
+                "state_decisions": context.state_decisions,
+                "skill_version": context.skill_version,
             },
         }
         input_path.write_text(

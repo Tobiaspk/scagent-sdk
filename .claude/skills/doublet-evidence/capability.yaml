@@ -1,7 +1,7 @@
 schema_version: 1
 skill:
   id: doublet-evidence
-  version: "0.2.0"
+  version: "0.2.1"
   description: GPU Scrublet evidence, explicit review, and identity-safe predicted-call filtering.
 tools:
   - name: evaluate_doublet_evidence

@@ -188,27 +188,160 @@ def _auto_caveats(facts: dict[str, Any], confidence: dict[str, str]) -> list[str
             )
     cluster_qc = facts.get("cluster_qc")
     if isinstance(cluster_qc, dict) and cluster_qc.get("warnings"):
-        caveats.append(
-            "Cluster QC emitted warnings that were visually reviewed; consult the cluster-QC "
-            "report and review rationales before reusing fine-grained labels."
+        # Only claim a review happened when it resolves this exact evidence object.
+        review = cluster_qc.get("review")
+        review_is_current = (
+            isinstance(review, dict)
+            and review.get("status") == "resolved"
+            and review.get("evidence_id") == cluster_qc.get("evidence_id")
+            and review.get("clustering_id") == cluster_qc.get("clustering_id")
         )
+        if review_is_current:
+            caveats.append(
+                "Cluster QC emitted warnings that were visually reviewed; consult the cluster-QC "
+                "report and review rationales before reusing fine-grained labels."
+            )
+        else:
+            caveats.append(
+                "Cluster QC emitted warnings and no current resolved review is on record for "
+                "this clustering; consult the cluster-QC report before reusing these labels."
+            )
     annotation = facts.get("annotation")
     review = annotation.get("review") if isinstance(annotation, dict) else None
-    if isinstance(review, dict) and review.get("reference_waiver"):
-        caveats.append(
-            "Only one independent annotation reference was used: "
-            + str(review["reference_waiver"])
+    if isinstance(review, dict):
+        if review.get("reference_waiver"):
+            caveats.append(
+                "Only one independent annotation reference was used: "
+                + str(review["reference_waiver"])
+            )
+        elif not review.get("deg_primary"):
+            # Not a floor -- the marker skill allows marker-free review -- but the reader must be
+            # told the labels rest on reference inference with no registered DEG evidence.
+            caveats.append(
+                "Final labels were reviewed without registered marker/DEG evidence and without a "
+                "recorded reference_waiver; the label basis is reference inference alone. "
+                "Reviewed methods: "
+                + (", ".join(str(m) for m in review.get("methods_reviewed", [])) or "none")
+                + "."
+            )
+    evidence = annotation.get("evidence") if isinstance(annotation, dict) else None
+    analysis = facts.get("analysis")
+    cell_set = analysis.get("cell_set") if isinstance(analysis, dict) else None
+    clustering = analysis.get("clustering") if isinstance(analysis, dict) else None
+    current_cell_set_id = cell_set.get("id") if isinstance(cell_set, dict) else None
+    current_clustering_id = clustering.get("id") if isinstance(clustering, dict) else None
+    evidence_items = evidence.items() if isinstance(evidence, dict) else ()
+    registered_methods = {
+        str(method)
+        for method, item in evidence_items
+        if isinstance(item, dict)
+        and item.get("status") == "complete"
+        and (current_cell_set_id is None or item.get("cell_set_id") == current_cell_set_id)
+        and (
+            current_clustering_id is None
+            or item.get("clustering_id") == current_clustering_id
         )
+    }
+    reference_runs = facts.get("reference_runs")
+    if isinstance(reference_runs, dict):
+        unregistered = sorted(
+            str(method)
+            for method, runs in reference_runs.items()
+            if str(method) in {"celltypist", "scimilarity"}
+            and isinstance(runs, dict)
+            and any(
+                isinstance(run, dict)
+                and run.get("status") == "complete"
+                and (
+                    current_cell_set_id is None
+                    or run.get("cell_set_id") == current_cell_set_id
+                )
+                for run in runs.values()
+            )
+            and str(method) not in registered_methods
+        )
+        if unregistered:
+            caveats.append(
+                "Reference method(s) completed but were never registered as cluster-level "
+                "annotation evidence, so they did not inform the recorded review: "
+                + ", ".join(unregistered)
+                + ". Their per-cell calls are on the artifact; summarize them by cluster to "
+                "register that evidence."
+            )
     low = sorted(cluster for cluster, value in confidence.items() if value == "low")
     if low:
         caveats.append("Low-confidence final labels remain for clusters: " + ", ".join(low))
     return caveats
 
 
+def _durable_decision_provenance(
+    decision: dict[str, Any], analysis: dict[str, Any]
+) -> str:
+    """Describe identity currency without pretending an unbound decision is current."""
+
+    bindings = (
+        ("cell_set_id", "cell_set"),
+        ("count_representation_id", "count_representation"),
+    )
+    compared = 0
+    for decision_key, analysis_key in bindings:
+        recorded = decision.get(decision_key)
+        current_node = analysis.get(analysis_key)
+        current = current_node.get("id") if isinstance(current_node, dict) else None
+        if recorded is None or current is None:
+            continue
+        compared += 1
+        if recorded != current:
+            return "durable decision; stale for current lineage"
+    if compared:
+        return "durable decision; identity binding matches current lineage"
+    return "durable decision; current-lineage evidence binding unavailable"
+
+
+def _graph_provenance(analysis: dict[str, Any], adata: Any) -> dict[str, Any]:
+    """Resolve the graph source separately from the latest computed embedding."""
+
+    representation = analysis.get("representation", {})
+    clustering = analysis.get("clustering", {})
+    use_rep = None
+    graph_id = None
+    if isinstance(clustering, dict):
+        use_rep = clustering.get("representation_key")
+        graph_id = clustering.get("neighbor_graph_id")
+    if isinstance(representation, dict):
+        use_rep = use_rep or representation.get("neighbor_graph_representation_key")
+        graph_id = graph_id or representation.get("neighbor_graph_id")
+    neighbors = adata.uns.get("neighbors", {}) if hasattr(adata, "uns") else {}
+    params = neighbors.get("params", {}) if isinstance(neighbors, dict) else {}
+    if isinstance(params, dict):
+        use_rep = use_rep or params.get("use_rep")
+    return {"neighbor_graph_id": graph_id, "representation_key": use_rep}
+
+
+def _format_metric(value: Any) -> str:
+    return "not recorded" if value is None else f"{float(value):.6f}"
+
+
+def _validate_summary_metrics(summary: str, facts: dict[str, Any]) -> None:
+    """Keep model narrative from duplicating authoritative structured training numbers."""
+
+    analysis = facts.get("analysis", {})
+    if (
+        isinstance(analysis, dict)
+        and isinstance(analysis.get("scvi_training"), dict)
+        and "elbo" in summary.casefold()
+    ):
+        raise ValueError(
+            "analysis_summary must not manually transcribe ELBO values; finalization renders "
+            "the exact structured scVI training metrics automatically"
+        )
+
+
 def _render_report(
     *,
     summary: str,
     facts: dict[str, Any],
+    decisions: dict[str, Any],
     history: list[dict[str, Any]],
     path: Path,
     adata: Any,
@@ -228,6 +361,8 @@ def _render_report(
     cluster_qc = facts.get("cluster_qc", {})
     batch = facts.get("batch", {})
     annotation = facts.get("annotation", {})
+    graph = _graph_provenance(analysis, adata)
+    scvi_training = analysis.get("scvi_training", {}) if isinstance(analysis, dict) else {}
     lines = [
         "# Comprehensive single-cell analysis report",
         "",
@@ -263,6 +398,15 @@ def _render_report(
         lines.append("| — | No committed capability history was readable | — | — | — |")
 
     qc_review = cell_qc.get("review", {}) if isinstance(cell_qc, dict) else {}
+    qc_decision_source = "current lineage facts"
+    if not isinstance(qc_review, dict) or not qc_review.get("decision"):
+        durable_qc = decisions.get("cell_qc_handling")
+        if isinstance(durable_qc, dict) and durable_qc.get("decision"):
+            qc_review = durable_qc
+            qc_decision_source = _durable_decision_provenance(durable_qc, analysis)
+        else:
+            qc_review = {}
+            qc_decision_source = "not recorded"
     lines.extend(
         [
             "",
@@ -272,24 +416,76 @@ def _render_report(
             f"- Flag counts: `{json.dumps(cell_qc.get('flag_counts', {}), sort_keys=True)}`",
             f"- QC decision: `{qc_review.get('decision', 'not recorded')}`",
             f"- QC rationale: {qc_review.get('rationale', 'not recorded')}",
+            f"- QC decision provenance: `{qc_decision_source}`",
         ]
     )
     for finding in qc_review.get("visual_findings", []) if isinstance(qc_review, dict) else []:
         lines.append(f"- Visual finding: {finding}")
     doublet_evidence = doublets.get("evidence", {}) if isinstance(doublets, dict) else {}
     doublet_decision = doublets.get("decision", {}) if isinstance(doublets, dict) else {}
+    doublet_decision_source = "current lineage facts"
+    if not isinstance(doublet_decision, dict) or not doublet_decision.get("decision"):
+        durable_doublet = decisions.get("doublet_handling")
+        if isinstance(durable_doublet, dict) and durable_doublet.get("decision"):
+            doublet_decision = durable_doublet
+            doublet_decision_source = _durable_decision_provenance(
+                durable_doublet, analysis
+            )
+        else:
+            doublet_decision = {}
+            doublet_decision_source = "not recorded"
     lines.extend(
         [
             f"- Doublet evidence: `{doublet_evidence.get('status', 'not recorded')}`",
             f"- Doublet handling: `{doublet_decision.get('decision', 'not recorded')}`",
+            f"- Doublet decision provenance: `{doublet_decision_source}`",
             "",
             "## Representation and clustering",
             "",
             "- Representation: `"
             + json.dumps(analysis.get("representation", {}), sort_keys=True, default=str)
             + "`",
+            "- Neighbor graph representation: `"
+            + str(graph.get("representation_key") or "not recorded")
+            + "`",
+            "- Neighbor graph identity: `"
+            + str(graph.get("neighbor_graph_id") or "not recorded")
+            + "`",
             f"- UMAP: `{json.dumps(analysis.get('umap', {}), sort_keys=True, default=str)}`",
             f"- Current clustering identity: `{clustering_id}`",
+        ]
+    )
+    if isinstance(scvi_training, dict) and scvi_training:
+        lines.extend(
+            [
+                "",
+                "### scVI training diagnostics",
+                "",
+                "- Epochs trained: `"
+                + str(scvi_training.get("epochs_trained", "not recorded"))
+                + "` (cap `"
+                + str(scvi_training.get("max_epochs", "not recorded"))
+                + "`)",
+                "- Early stopping: enabled `"
+                + str(scvi_training.get("early_stopping_enabled", "not recorded"))
+                + "`, triggered `"
+                + str(scvi_training.get("early_stopped", "not recorded"))
+                + "`",
+                "- Final train ELBO: `"
+                + _format_metric(scvi_training.get("final_train_elbo"))
+                + "`",
+                "- Final validation ELBO: `"
+                + _format_metric(scvi_training.get("final_validation_elbo"))
+                + "`",
+                "- Best validation ELBO: `"
+                + _format_metric(scvi_training.get("best_validation_elbo"))
+                + "` at epoch `"
+                + str(scvi_training.get("best_validation_epoch", "not recorded"))
+                + "`",
+            ]
+        )
+    lines.extend(
+        [
             "",
             "## Cluster-level QC",
             "",
@@ -317,6 +513,18 @@ def _render_report(
 
     batch_evidence = batch.get("evidence", {}) if isinstance(batch, dict) else {}
     batch_decision = batch.get("decision", {}) if isinstance(batch, dict) else {}
+    integration_score = (
+        batch.get("integration_score", {}) if isinstance(batch, dict) else {}
+    )
+    batch_decision_source = "current lineage facts"
+    if not isinstance(batch_decision, dict) or not batch_decision.get("decision"):
+        durable_batch = decisions.get("batch_handling")
+        if isinstance(durable_batch, dict) and durable_batch.get("decision"):
+            batch_decision = durable_batch
+            batch_decision_source = _durable_decision_provenance(durable_batch, analysis)
+        else:
+            batch_decision = {}
+            batch_decision_source = "not recorded"
     recorded_batch_decision = batch_decision.get("decision", "not recorded")
     if batch_evidence.get("status") == "not_applicable":
         recorded_batch_decision = "not_applicable"
@@ -329,6 +537,12 @@ def _render_report(
             f"- Recommendation: `{batch_evidence.get('recommendation', 'not recorded')}`",
             f"- Decision: `{recorded_batch_decision}`",
             f"- Rationale: {batch_decision.get('rationale', 'not recorded')}",
+            f"- Decision provenance: `{batch_decision_source}`",
+            "- Integration comparison status: `"
+            + str(integration_score.get("comparison_status", "not recorded"))
+            + "`",
+            "- Integration interpretation: "
+            + str(integration_score.get("interpretation", "not recorded")),
             "",
             "## Annotation evidence and adjudication",
             "",
@@ -389,6 +603,49 @@ def _render_report(
     return "\n".join(lines) + "\n"
 
 
+def _validate_cluster_qc_resolved(
+    facts: dict[str, Any], clustering_id: Any, cluster_key: str
+) -> None:
+    """Refuse to publish labels over a clustering whose recorded QC was never adjudicated.
+
+    This is an integrity check, not a mandatory pipeline step: it fires only when cluster QC was
+    actually evaluated *for the clustering being finalized* and then left unresolved. A targeted
+    analysis that never ran cluster QC records no ``cluster_qc`` fact and is unaffected, which
+    keeps the "guided, not gated" stance intact.
+
+    ``evaluate_cluster_qc`` writes a new ``evidence_id`` and ``review_cluster_qc`` binds its review
+    to that exact ID. Checking both identities prevents a stale review for the same clustering key
+    from certifying newly evaluated evidence, without requiring that QC exist in the first place.
+    """
+
+    cluster_qc = facts.get("cluster_qc")
+    if not isinstance(cluster_qc, dict) or cluster_qc.get("status") != "attested":
+        return
+    if clustering_id is None or cluster_qc.get("clustering_id") != clustering_id:
+        return
+    review = cluster_qc.get("review")
+    if not isinstance(review, dict) or review.get("clustering_id") != clustering_id:
+        raise ValueError(
+            f"cluster QC was evaluated for the current clustering {cluster_key!r} but never "
+            "reviewed (no cluster_qc.review for this clustering); call review_cluster_qc before "
+            "finalizing so the recorded labels rest on an adjudicated clustering."
+        )
+    evidence_id = cluster_qc.get("evidence_id")
+    if not evidence_id or review.get("evidence_id") != evidence_id:
+        raise ValueError(
+            "cluster QC review for the current clustering is stale: its evidence_id does not "
+            "match the current cluster-QC evidence. Re-review the current evidence before "
+            "finalizing."
+        )
+    if review.get("status") != "resolved":
+        unresolved = ", ".join(str(value) for value in review.get("unresolved_clusters", []))
+        raise ValueError(
+            "cluster QC review for the current clustering still has unresolved cluster "
+            f"action(s): {unresolved or 'unspecified'}. Resolve or re-review them before "
+            "finalizing."
+        )
+
+
 def _execute_finalization(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
     import matplotlib
 
@@ -408,6 +665,8 @@ def _execute_finalization(arguments: dict[str, Any], context: Any) -> dict[str, 
     overrides = parsed["overrides"]
     caveats = list(parsed["caveats"])
     summary = parsed["summary"]
+    _validate_summary_metrics(summary, context.state_facts)
+    current_analysis = context.state_facts.get("analysis", {})
 
     path = Path(str(arguments["path"])).expanduser().resolve()
     adata = _read_matrix(path)
@@ -419,7 +678,6 @@ def _execute_finalization(arguments: dict[str, Any], context: Any) -> dict[str, 
     )
     provenance = dict(adata.uns.get("scagent_sdk", {}))
     input_clustering_id = provenance.get("clustering_id")
-    current_analysis = context.state_facts.get("analysis", {})
     current_clustering = (
         current_analysis.get("clustering", {}) if isinstance(current_analysis, dict) else {}
     )
@@ -433,6 +691,7 @@ def _execute_finalization(arguments: dict[str, Any], context: Any) -> dict[str, 
         input_clustering_id=input_clustering_id,
         current_clustering_id=current_clustering_id,
     )
+    _validate_cluster_qc_resolved(context.state_facts, current_clustering_id, cluster_key)
 
     # Only labels are required. Optional evidence fields remain useful in reports when supplied,
     # but missing entries do not turn publication into a second annotation-review workflow.
@@ -500,7 +759,7 @@ def _execute_finalization(arguments: dict[str, Any], context: Any) -> dict[str, 
         {
             "tool": "finalize_analysis",
             "skill": "finalize-analysis",
-            "skill_version": "0.5.0",
+            "skill_version": getattr(context, "skill_version", None) or "0.6.0",
             "arguments": arguments,
         }
     )
@@ -510,6 +769,7 @@ def _execute_finalization(arguments: dict[str, Any], context: Any) -> dict[str, 
     report = _render_report(
         summary=summary,
         facts=context.state_facts,
+        decisions=getattr(context, "state_decisions", {}),
         history=history,
         path=path,
         adata=adata,

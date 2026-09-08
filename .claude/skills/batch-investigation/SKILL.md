@@ -43,6 +43,13 @@ This skill separates evidence from the decision without forcing either step into
    If there is no meaningful batch variable, pass `batch_key=null`; no second decision call is
    needed.
 
+   When an uncorrected UMAP already exists and the batch column is meaningful, also generate a
+   sample-colored view during this investigation and retain its artifact identity with the
+   explanation. It is advisory visual context showing *where* samples separate, not evidence of
+   technical causality and never sufficient by itself to recommend integration. If no UMAP exists
+   or another bounded view is more informative, explain that choice rather than constructing a
+   representation solely to satisfy a plotting ritual.
+
    The tool takes **no design or condition inputs** — only `path`, `batch_key`, and `cluster_key`.
    Pass the obvious sample/donor column as `batch_key` and the clustering you already have; there is
    nothing else to "decide" about what to pass. This is deliberate: whether a sample-linked split is

@@ -1,7 +1,7 @@
 schema_version: 1
 skill:
   id: scvi-integration
-  version: "0.4.0"
+  version: "0.5.0"
   description: Standalone count-aware scVI latent-model training.
 tools:
   - name: train_scvi_latent
@@ -32,6 +32,7 @@ tools:
       type: object
       properties:
         path: {type: string, description: "Integrated H5AD/zarr with obsm['X_scVI'] (and obsm['X_pca'] baseline)."}
+        baseline_path: {type: string, description: "Optional uncorrected H5AD/zarr carrying X_pca. Cells and batch labels must identity-match the corrected artifact; use this when the scVI artifact did not preserve X_pca."}
         batch_key: {type: string, description: "Batch column; defaults to the key scVI conditioned on."}
         use_rep: {type: string, default: X_scVI, description: "Corrected latent to score (never X_umap)."}
         n_neighbors: {type: integer, minimum: 5, maximum: 200, default: 50}

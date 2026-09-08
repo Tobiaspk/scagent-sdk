@@ -14,15 +14,21 @@ count-like alternative, and refuses ambiguity. A valid count matrix is finite, n
 integer-valued. Explicit `X`, `raw`, or `layer` selection is available when the scientist knows
 which representation is authoritative.
 
+When the active analyzed artifact has lost its count layer but an identity-matched raw artifact is
+available, keep the active artifact as `path` and pass the raw artifact as `counts_from`. The tool
+requires exactly the same cells and genes, aligns their order, and adds `layers["counts"]` without
+replacing normalized `X`, embeddings, graphs, annotations, or their lineage facts. Do not adopt the
+raw file as a new analysis root merely to satisfy a downstream count requirement.
+
 The output records count, cell-set, and dataset-revision identities derived from the actual
 matrix and names. Those identities describe the artifact; they are not proof that another tool
 ran first.
 
-The selected counts are written to both `X` and `layers["counts"]`. Because that duplicates them,
-the artifact drops what it just copied: an `.raw`, and the source layer when a layer was selected.
-Unrelated layers are preserved, and the input file is immutable and recorded in
-`dataset_revision.source_path`, so nothing is lost. `details.dropped_payload` names exactly what
-was omitted — report it rather than describing the artifact as a faithful copy of the input.
+In ordinary materialization, the selected counts are written to both `X` and `layers["counts"]`.
+Because that duplicates them, the artifact drops what it just copied: an `.raw`, and the source
+layer when a layer was selected. In `counts_from` attachment mode, only `layers["counts"]` is added
+and no target payload is dropped. Inputs remain immutable, and `details.dropped_payload` names
+exactly what was omitted — report it rather than describing the artifact as a faithful copy.
 
 Read [references/count-contract.md](references/count-contract.md) for source-selection and
 lineage details.

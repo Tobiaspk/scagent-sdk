@@ -33,6 +33,11 @@ Use it once after integrating instead of re-running the gene-first batch investi
 sample-linked gene program surviving after scVI is expected per-donor biology, not evidence the
 integration failed — read success from the mixing improvement.
 
+When the corrected artifact does not carry `X_pca`, pass the uncorrected PCA artifact as
+`baseline_path`; the scorer identity-checks and aligns its cells and verifies the batch labels.
+Without either baseline source it still reports corrected mixing as useful descriptive evidence,
+but marks the comparison incomplete and does not claim that correction improved mixing.
+
 Evaluate batch evidence before adopting a corrected representation. Do not encode the biological
 condition of interest as a nuisance batch merely to increase mixing.
 

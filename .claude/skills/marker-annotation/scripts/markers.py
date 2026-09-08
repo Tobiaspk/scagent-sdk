@@ -22,6 +22,23 @@ def _identity(kind: str, value: Any) -> str:
     return f"{kind}:sha256:{hashlib.sha256(encoded).hexdigest()}"
 
 
+def _json_number(value: Any) -> float | None:
+    """JSON-safe float: a non-finite Scanpy statistic becomes ``null``, never a clamped stand-in.
+
+    Scanpy reports an infinite log fold-change when a gene is undetected outside its group, and
+    ``nan`` when a statistic is undefined. Both are real results, but neither is JSON-representable
+    and the executor serializes durable state with ``allow_nan=False`` -- so emitting them raised
+    ``ValueError: Out of range float values are not JSON compliant`` and failed the capability.
+    Clamping infinity to a large finite number would misreport "absent from the comparison group" as
+    a measured magnitude, so the value is reported as ``null`` and counted in ``warnings``.
+    """
+
+    import math
+
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
 HUMAN_MARKERS = {
     "T cell": ["CD3D", "CD3E", "TRAC", "IL7R", "LTB"],
     "Cytotoxic lymphocyte": ["NKG7", "GNLY", "PRF1", "GZMB", "CTSW"],
@@ -234,9 +251,9 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
             "top_degs": [
                 {
                     "gene": str(row.names),
-                    "score": float(row.scores),
-                    "logfoldchange": float(row.logfoldchanges),
-                    "adjusted_pvalue": float(row.pvals_adj),
+                    "score": _json_number(row.scores),
+                    "logfoldchange": _json_number(row.logfoldchanges),
+                    "adjusted_pvalue": _json_number(row.pvals_adj),
                 }
                 for row in frame.head(10).itertuples(index=False)
             ],
@@ -258,6 +275,19 @@ def run(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
             ),
             reverse=True,
         )[:3]
+    non_finite = sum(
+        1
+        for summary in deg_summary.values()
+        for entry in summary["top_degs"]
+        for key in ("score", "logfoldchange", "adjusted_pvalue")
+        if entry[key] is None
+    )
+    if non_finite:
+        warnings.append(
+            f"{non_finite} reported DEG statistic(s) were non-finite and are reported as null; "
+            "an infinite log fold-change means the gene is undetected outside its cluster. "
+            "Scanpy computed the ranking order before these values were converted for JSON."
+        )
     pd.DataFrame(rows).to_csv(context.staging_dir / "marker-program-scores.csv", index=False)
     (context.staging_dir / "marker-candidates.json").write_text(
         json.dumps(candidates, indent=2, sort_keys=True) + "\n", encoding="utf-8"

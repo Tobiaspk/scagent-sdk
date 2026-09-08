@@ -58,6 +58,25 @@ def test_matrix_reading_skills_accept_directory_stores_not_only_files() -> None:
     assert not offenders, f"matrix-reading skills reject .zarr directory inputs: {offenders}"
 
 
+# These open a user- or artifact-supplied dataset path but carry no `_read_matrix`, so the scan
+# above never reached them. That is exactly how they stayed .h5ad/is_file()-only through the zarr
+# flip, leaving every in-session artifact uninspectable and undescribable; guard them by name.
+DATASET_ENTRY_SCRIPTS = (
+    "inspect-dataset/scripts/inspect_dataset.py",
+    "inspect-dataset/scripts/describe.py",
+    "inspect-dataset/scripts/convert.py",
+)
+
+
+def test_dataset_entry_points_accept_directory_stores() -> None:
+    offenders = [
+        rel
+        for rel in DATASET_ENTRY_SCRIPTS
+        if "if not path.is_file()" in (SKILLS / rel).read_text(encoding="utf-8")
+    ]
+    assert not offenders, f"dataset entry points reject .zarr directory inputs: {offenders}"
+
+
 def test_zarr_writer_skills_do_not_declare_an_h5ad_matrix_artifact() -> None:
     # A skill that writes a .zarr store must declare that store as its artifact, not a stale .h5ad
     # path -- otherwise the executor looks for a file that was never written ("declared artifact

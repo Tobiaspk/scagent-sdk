@@ -1,8 +1,75 @@
 # Current project state
 
-Status date: 2026-08-26
+Status date: 2026-09-02
 Authority: this is the concise source of truth for what exists now, what was actually verified,
 and what should happen next. Historical detail remains in `docs/handoff.md`.
+
+## Intent-aware provenance and report repair (2026-09-03)
+
+Audit of `run_20260903T160601Z_87dea1` separated scientific discretion from mechanical truth.
+Focused requests remain focused, and no Scrublet/finalization predecessor was added. The
+comprehensive orchestration guidance now notices applicable doublet evidence during the early QC
+phase and asks the model to run, defer, or explain it there; a targeted request such as running
+scVI is explicitly unaffected. An existing uncorrected UMAP is normally shown by sample during
+batch investigation as advisory context, never as causal evidence or a reason to manufacture an
+otherwise-unneeded pipeline step.
+
+Count recovery no longer requires replacing a processed lineage with its raw source.
+`materialize_count_matrix(counts_from=...)` identity-checks and aligns a separate raw artifact,
+then adds `layers['counts']` to the continuing analyzed artifact while preserving normalized `X`,
+embeddings, graphs, annotations, and inherited facts. Ordinary materialization retains its prior
+reset semantics. Batch facts are no longer cleared by PCA or neighbor construction because the
+batch decision is bound to cells/counts and is intended to survive representation changes.
+
+Representation provenance now records available embeddings and, independently, the representation
+that backs the current neighbor graph, UMAP, and clustering. Clustering resolves Scanpy's actual
+`neighbors.params.use_rep` for older artifacts rather than trusting whichever embedding was most
+recently added. Integration scoring accepts an identity-checked `baseline_path`; without `X_pca`
+it reports corrected mixing as descriptive evidence but marks improvement unknown instead of
+calling the integration good.
+
+Capability context now carries a read-only durable-decision snapshot. Final reports use current
+facts first, then recover recorded QC/doublet/batch choices from durable decisions with explicit
+current/stale/unbound provenance instead of falsely saying “not recorded.” scVI persists exact
+epoch, early-stopping, final ELBO, and best-validation metrics as structured facts, and finalization
+renders those values directly while refusing manually transcribed ELBO numbers in its narrative.
+
+Verification: the full unit suite passes, repository-wide Ruff and strict mypy are clean, and
+capability validation passes at 24 skills / 23 executable / 53 tools.
+
+## Zarr interoperability and evidence-bound publication repair (2026-09-02)
+
+Run `run_20260901T204606Z_5d5462` completed scientifically but exposed an avoidable lineage reset:
+the SDK produced Zarr working artifacts that several consumers still treated as files or H5AD-only.
+`materialize_count_matrix` now routes `.zarr` before generic directories; `inspect_dataset`,
+`describe_dataset`, and `convert_gene_ids` accept Zarr stores; normalization resolves raw counts
+from `layers['counts']` or validated `X` under `auto`. `describe_dataset` uses AnnData's lazy Zarr
+reader, materializes only annotations plus a bounded row block, reports embedding shapes, and fails
+clearly if lazy support is unavailable instead of silently loading a large store whole.
+
+Dataset identity remains cheap by default without pretending one chunk represents a store. The
+sampled Zarr fingerprint hashes the complete path/size manifest and distributes a fixed 2 MiB
+content budget over metadata and representative AnnData namespaces; `full` remains the immutable
+byte-identity option. Arbitrary directories and `.zarr`-suffixed directories without root Zarr
+metadata are rejected. On the affected 421 MiB artifact, the sampler selected 58 of 1,385 members
+across matrix, layers, annotations, embeddings, graphs, raw, and metadata.
+
+Scanpy's non-finite marker statistics are now serialized as JSON `null` with an aggregate warning,
+so infinite log fold-changes no longer crash durable result serialization. Finalization adds one
+narrow consistency boundary: when successfully attested cluster QC exists for the exact clustering
+being published, its review must be resolved and bound to the current `evidence_id`. No cluster-QC
+fact, non-attested QC state, or QC for a different clustering gates publication. Missing marker or
+current completed reference
+summaries remain report caveats, not predecessor floors; stale, failed, and atlas-query runs are not
+misreported as omitted annotation evidence. This preserves model-planned analysis while preventing
+stale evidence from certifying a publication.
+
+Verification: **735 tests passed, 4 skipped** in the control-plane environment; every changed Python
+file is Ruff-clean; strict mypy is clean; capability validation passes at 24 skills / 23 executable /
+53 tools. The configured scientific runtime also passed a real Zarr round trip with lazy reading,
+`predicted_doublet` preservation, and a reported 30-dimensional `X_scVI`. Repository-wide Ruff is
+still stopped only by the pre-existing E501 in
+`.claude/skills/batch-investigation/scripts/investigate.py:338`, outside this change.
 
 ## Final annotation is model-planned, not a cross-workflow certification gate (2026-08-27)
 

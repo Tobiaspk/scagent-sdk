@@ -2,12 +2,12 @@ schema_version: 1
 
 skill:
   id: inspect-dataset
-  version: "0.2.0"
-  description: Establish deterministic file identity and report H5AD contents before scientific analysis.
+  version: "0.2.1"
+  description: Establish deterministic file or Zarr identity and report AnnData contents before scientific analysis.
 
 tools:
   - name: inspect_dataset
-    description: Inspect a local dataset file, fingerprint it, and record provenance without loading the matrix.
+    description: Inspect a local dataset file or .zarr store, fingerprint it, and record provenance without loading the matrix.
     entrypoint: scripts/inspect_dataset.py:run
     environment: current
     activity_label: Inspecting dataset
@@ -17,15 +17,15 @@ tools:
       properties:
         path:
           type: string
-          description: Absolute or working-directory-relative path to the dataset file.
+          description: Absolute or working-directory-relative path to a dataset file or .zarr store.
         hash_mode:
           type: string
           enum: [sampled, full]
           default: sampled
-          description: Sampled hashes metadata plus file head/tail; full hashes every byte.
+          description: Sampled hashes a file head/tail or a Zarr manifest plus distributed store members; full hashes every byte.
       required: [path]
   - name: describe_dataset
-    description: Report the contents of an H5AD file (shape, X/layer/raw value facts, obs/var columns, embeddings, gene-identifier signals) without the model writing exploratory code. Judgment-free facts only.
+    description: Report the contents of an H5AD file or .zarr store (shape, X/layer/raw value facts, obs/var columns, embeddings, gene-identifier signals) without the model writing exploratory code. Judgment-free facts only.
     entrypoint: scripts/describe.py:run
     environment: gpu-singlecell
     activity_label: Describing dataset contents
@@ -35,7 +35,7 @@ tools:
       properties:
         path:
           type: string
-          description: Absolute or working-directory-relative path to an .h5ad file.
+          description: Absolute or working-directory-relative path to an .h5ad file or .zarr store.
         max_values:
           type: integer
           minimum: 1
@@ -47,7 +47,7 @@ tools:
           minimum: 100
           maximum: 100000
           default: 4000
-          description: Rows materialized in memory for matrix value sampling on backed files.
+          description: Rows materialized in memory for matrix value sampling on backed or lazy inputs.
       required: [path]
   - name: convert_gene_ids
     description: Convert var_names to gene symbols (offline, via the dataset's own symbol column) and save a new provenance-bearing AnnData with original IDs preserved. Use when describe_dataset reports Ensembl/Entrez/mixed var_names, before tools that align to a gene-symbol space (annotation, marker overlap, plotting).
@@ -61,7 +61,7 @@ tools:
         branch_from: {type: string, description: "Fork an alternative from a recorded version instead of continuing the current one. The active version does not change. Use this to compare alternatives - not to work around a superseded path."}
         path:
           type: string
-          description: Absolute or working-directory-relative path to an .h5ad file.
+          description: Absolute or working-directory-relative path to an .h5ad file or .zarr store.
         organism:
           type: string
           enum: [auto, human, mouse]

@@ -335,7 +335,8 @@ SUGGESTION_PLAIN = {
         "signatures of the matched clusters agree, so they are the same population separated by "
         "sample rather than different cell types. That split is exactly what integration is meant "
         "to fix — integrating with scVI (the sample as the batch covariate) co-embeds these shared "
-        "populations. The one thing the genes cannot tell you is whether that per-sample difference "
+        "populations. The one thing the genes cannot tell you is whether that per-sample "
+        "difference "
         "is a technical batch effect or real biology you intend to study; that is an experimental-"
         "design question only you can answer. Recommended: integrate with scVI — unless these "
         "per-sample differences are the contrast you want to keep, in which case keep the "
@@ -1608,6 +1609,10 @@ def run_decision(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
         "rationale": rationale,
         "evidence_id": evidence_id,
     }
+    durable_decision = dict(decision_fact)
+    for key in ("cell_set_id", "count_representation_id"):
+        if evidence.get(key) is not None:
+            durable_decision[key] = evidence[key]
     (context.staging_dir / "batch-decision.md").write_text(
         f"# Batch handling decision\n\n- Decision: **{decision}**\n"
         f"- Evidence: `{evidence_id}`\n\n## Rationale\n\n{rationale}\n",
@@ -1617,7 +1622,12 @@ def run_decision(arguments: dict[str, Any], context: Any) -> dict[str, Any]:
         "summary": f"Recorded batch decision {decision!r} against the current evidence.",
         "details": decision_fact,
         "facts_patch": {"batch": {"decision": decision_fact}},
-        "decisions_patch": {"batch_handling": {"decision": decision, "rationale": rationale}},
+        # Keep the durable decision self-describing. Node-scoped batch facts can legitimately
+        # disappear when another lineage becomes active; reporting must still be able to say that
+        # a decision was recorded, while checking these bindings before calling it current.
+        "decisions_patch": {
+            "batch_handling": durable_decision
+        },
         "artifacts": [
             {
                 "name": "batch-decision",
