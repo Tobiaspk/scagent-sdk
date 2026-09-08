@@ -57,7 +57,7 @@ This skill separates evidence from the decision without forcing either step into
    answers, not a lever the agent can pull to steer the verdict. So `design_interpretation` is always
    `unknown` and the recommendation is a function of the **gene evidence alone**.
 
-2. Present the material conclusion and design limitation concisely, and present the handling
+2. Present the key finding and the design limitation concisely, and present the handling
    choice **with a recommended default, not a neutral menu** — the way the legacy checkpoint did.
    When the same sample-linked program recurs across populations and confirmed cross-sample
    identity pairs show the same population split by sample, recommend **integration (scVI)**:
@@ -68,8 +68,8 @@ This skill separates evidence from the decision without forcing either step into
 
    **Then STOP and ask the user — never decide this yourself.** Batch handling is the user's call,
    not yours — integrating rewrites the representation the whole downstream analysis continues
-   from, and no gene table can settle technical-vs-biological on its own. So state the material
-   conclusion, say in one line what the recommendation rests on and what the design cannot tell
+   from, and no gene table can settle technical-vs-biological on its own. So state the key
+   finding, say in one line what the recommendation rests on and what the design cannot tell
    you, then present the choice as a short selector **in this exact order** and END YOUR TURN:
    (1) the recommended option (integrate with scVI when the evidence is
    `recurring_sample_associated`, otherwise keep uncorrected), (2) the other of integrate /
