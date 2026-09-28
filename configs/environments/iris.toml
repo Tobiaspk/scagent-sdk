@@ -4,14 +4,14 @@ host = "iris"
 # Physical runtimes own interpreter and loader activation. Logical capabilities below may
 # share a runtime without duplicating or exposing its host-specific mechanics to skills.
 [runtimes.rapids-main]
-python = "/home/ibrahih3/projects/scagent-sdk/.pixi/envs/rapids/bin/python"
-prefix = "/home/ibrahih3/projects/scagent-sdk/.pixi/envs/rapids"
+python = "${SCAGENT_SDK_PROJECT_ROOT}/.pixi/envs/rapids/bin/python"
+prefix = "${SCAGENT_SDK_PROJECT_ROOT}/.pixi/envs/rapids"
 probe_timeout_seconds = 180
 gpu_probe = "cupy"
 probe_modules = ["torch", "numpy", "rapids_singlecell", "cupy", "scvi"]
 provenance_files = [
-  "/home/ibrahih3/projects/scagent-sdk/pixi.toml",
-  "/home/ibrahih3/projects/scagent-sdk/pixi.lock",
+  "${SCAGENT_SDK_PROJECT_ROOT}/pixi.toml",
+  "${SCAGENT_SDK_PROJECT_ROOT}/pixi.lock",
 ]
 
 [runtimes.rapids-main.environment]
@@ -21,73 +21,34 @@ CUDA_HOME = "{prefix}"
 LD_PRELOAD = "{prefix}/lib/libstdc++.so.6:{prefix}/lib/libnvJitLink.so.13"
 
 [runtimes.cellbender]
-python = "/home/ibrahih3/projects/scagent-sdk/.pixi/envs/cellbender/bin/python"
-prefix = "/home/ibrahih3/projects/scagent-sdk/.pixi/envs/cellbender"
+python = "${SCAGENT_SDK_PROJECT_ROOT}/.pixi/envs/cellbender/bin/python"
+prefix = "${SCAGENT_SDK_PROJECT_ROOT}/.pixi/envs/cellbender"
 probe_timeout_seconds = 300
 gpu_probe = "torch"
 probe_modules = ["torch", "cellbender"]
 provenance_files = [
-  "/home/ibrahih3/projects/scagent-sdk/pixi.toml",
-  "/home/ibrahih3/projects/scagent-sdk/pixi.lock",
+  "${SCAGENT_SDK_PROJECT_ROOT}/pixi.toml",
+  "${SCAGENT_SDK_PROJECT_ROOT}/pixi.lock",
 ]
 
 [runtimes.cellbender.environment]
 MPLBACKEND = "Agg"
 
 [runtimes.diffxpy]
-python = "/home/ibrahih3/projects/scagent-sdk/.pixi/envs/diffxpy/bin/python"
-prefix = "/home/ibrahih3/projects/scagent-sdk/.pixi/envs/diffxpy"
+python = "${SCAGENT_SDK_PROJECT_ROOT}/.pixi/envs/diffxpy/bin/python"
+prefix = "${SCAGENT_SDK_PROJECT_ROOT}/.pixi/envs/diffxpy"
 probe_timeout_seconds = 180
 gpu_probe = "torch"
 probe_modules = ["numpy", "diffxpy"]
 provenance_files = [
-  "/home/ibrahih3/projects/scagent-sdk/pixi.toml",
-  "/home/ibrahih3/projects/scagent-sdk/pixi.lock",
+  "${SCAGENT_SDK_PROJECT_ROOT}/pixi.toml",
+  "${SCAGENT_SDK_PROJECT_ROOT}/pixi.lock",
 ]
 
 [runtimes.diffxpy.environment]
 MPLBACKEND = "Agg"
 TF_CPP_MIN_LOG_LEVEL = "3"
 CUDA_VISIBLE_DEVICES = ""
-
-[runtimes.biorun]
-# The bio_models_inference project's single runtime venv: torch 2.13 (cu130),
-# the cell and protein foundation models, and biorun itself. It is deliberately
-# not a Pixi environment -- that project is uv-managed and owns its own lock.
-# A real file, not a symlink: this registry resolves the configured path with
-# Path.resolve(), and every venv's bin/python points at the base interpreter, so
-# naming it directly would run a CPython with none of these packages installed.
-python = "/data1/peerd/ibrahih3/bio_models_inference/scripts/biorun-python"
-prefix = "/data1/peerd/ibrahih3/bio_models_inference/.venv"
-probe_timeout_seconds = 300
-gpu_probe = "torch"
-probe_modules = ["torch", "anndata", "scanpy", "biorun"]
-provenance_files = [
-  "/data1/peerd/ibrahih3/bio_models_inference/pyproject.toml",
-  "/data1/peerd/ibrahih3/bio_models_inference/uv.lock",
-]
-
-[runtimes.biorun.environment]
-MPLBACKEND = "Agg"
-HF_HOME = "/data1/peerd/ibrahih3/hf"
-# Weights are resolved from the cache only; biorun raises with the exact
-# download command rather than pulling gigabytes inside a session.
-BIORUN_ALLOW_DOWNLOAD = "0"
-# UCE's figshare assets and TranscriptFormer's tarball are not on Hugging Face and
-# default to ./weights, which only resolves from that project's own root.
-BIORUN_WEIGHTS_DIR = "/data1/peerd/ibrahih3/bio_models_inference/weights"
-
-[capabilities.biorun]
-runtime = "biorun"
-timeout_seconds = 7200
-# No GPU floor: `check_dataset_for_fm` never touches one, and `embed_cells_with_fm`
-# falls back to CPU. biorun picks cuda:0 when it is available and says which device
-# it used in provenance, so a busy GPU degrades the run rather than blocking it.
-gpu_required = false
-required_modules = ["biorun", "torch", "anndata", "scanpy"]
-
-[capabilities.biorun.environment]
-BIORUN_PYTHON = "/data1/peerd/ibrahih3/bio_models_inference/scripts/biorun-python"
 
 [capabilities.gpu-singlecell]
 runtime = "rapids-main"

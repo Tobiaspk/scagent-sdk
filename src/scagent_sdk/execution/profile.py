@@ -248,6 +248,9 @@ class EnvironmentRegistry:
             raise EnvironmentProfileError(f"environment profile file not found: {source}") from exc
         except tomli.TOMLDecodeError as exc:
             raise EnvironmentProfileError(f"invalid environment TOML {source}: {exc}") from exc
+        # Repository profiles name paths relative to ${SCAGENT_SDK_PROJECT_ROOT}.
+        if source.parent.name == "environments" and source.parent.parent.name == "configs":
+            os.environ.setdefault("SCAGENT_SDK_PROJECT_ROOT", str(source.parents[2]))
         schema_version = int(raw.get("schema_version", 1))
         if schema_version == 1:
             return cls._from_v1(raw, source)
