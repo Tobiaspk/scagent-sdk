@@ -4,6 +4,7 @@ import re
 from pathlib import Path
 
 from scagent_sdk.capabilities.instructions import (
+    INSTRUCTION_BUDGET_BYTES,
     instruction_sources,
     render_skill_instructions,
     strip_frontmatter,
@@ -56,7 +57,24 @@ def test_budget_overflow_names_the_omitted_skills_instead_of_trimming_silently(
 
     assert "### small-skill" in block
     assert "### huge-skill" not in block
-    assert "load them with the `Skill` tool before use: huge-skill" in block
+    # The pointer must be a file the model can read in any harness — not a `Skill` tool, which
+    # the opencode bridge disables.
+    assert "exceeded the inline budget" in block
+    assert f"huge-skill (`{tmp_path / 'huge-skill' / 'SKILL.md'}`)" in block
+    assert "`Skill` tool" not in block
+
+
+def test_unreadable_and_over_budget_are_reported_as_different_problems(tmp_path: Path) -> None:
+    huge = _skill(tmp_path, "huge-skill", "x" * 4000)
+    ghost = DiscoveredSkill(
+        name="ghost-skill", root=tmp_path / "ghost-skill", fingerprint="sha256:y", executable=False
+    )
+
+    block = render_skill_instructions((huge, ghost), budget_bytes=1500)
+
+    assert "huge-skill" in block.split("exceeded the inline budget")[-1]
+    assert "ghost-skill" in block.split("could not be read")[-1]
+    assert "ghost-skill" not in block.split("could not be read")[0]
 
 
 def test_unreadable_instructions_are_reported_not_skipped_quietly(tmp_path: Path) -> None:
@@ -88,5 +106,11 @@ def test_every_project_skill_reaches_the_model_within_budget() -> None:
     for skill in skills:
         assert f"### {skill.name}" in block
     assert "exceeded the inline budget" not in block
+    # Fail while there is still room to fix it, not on the commit that silently drops a skill.
+    # If this trips, either raise INSTRUCTION_BUDGET_BYTES deliberately or shorten a SKILL.md.
+    assert len(block) < 0.75 * INSTRUCTION_BUDGET_BYTES, (
+        f"skill corpus is {len(block)} B of a {INSTRUCTION_BUDGET_BYTES} B budget — "
+        "headroom is nearly gone"
+    )
     # Substantive guidance, not just headings: a caveat the tool schema does not carry.
     assert "not a universal default for every tissue" in flat

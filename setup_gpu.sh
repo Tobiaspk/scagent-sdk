@@ -72,6 +72,12 @@ SCAGENT_SDK_PIXI="${_SCAGENT_SDK_PIXI}" \
 
 source "${_SCAGENT_SDK_ROOT}/.venv/bin/activate"
 
+# `scagent` is the OpenCode-backed interface. Keep this repository's launcher
+# ahead of the historical Python-console alias installed in the venv;
+# `scagent-sdk` remains the explicit native SDK terminal.
+PATH="${_SCAGENT_SDK_ROOT}/scripts:${PATH}"
+export PATH
+
 export SCAGENT_SDK_PROJECT_ROOT="${_SCAGENT_SDK_ROOT}"
 export SCAGENT_SDK_UV="${_SCAGENT_SDK_UV}"
 export SCAGENT_SDK_PIXI="${_SCAGENT_SDK_PIXI}"
@@ -88,7 +94,8 @@ echo "  profile:  ${SCAGENT_SDK_MODEL_PROFILE}"
 echo "  sessions: ${SCAGENT_SDK_SESSIONS_DIR}"
 echo "  compute:  brokered from ${SCAGENT_SDK_ENVIRONMENTS_FILE}"
 echo "  locks:    uv.lock + pixi.lock"
-echo "Run: scagent start"
+echo "Run OpenCode-backed scAgent: scagent"
+echo "Run the native SDK terminal: scagent-sdk start"
 
 unset _SCAGENT_SDK_ROOT _SCAGENT_SDK_UV _SCAGENT_SDK_UV_CANDIDATE
 unset _SCAGENT_SDK_PIXI _SCAGENT_SDK_PIXI_CANDIDATE

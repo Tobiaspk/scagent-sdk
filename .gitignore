@@ -15,3 +15,7 @@ build/
 *.egg-info/
 sessions/
 .env
+
+# macOS metadata
+._*
+.DS_Store

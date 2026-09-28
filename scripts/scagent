@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# One implementation only: `scagent` is exactly the working OpenCode spike
+# launcher, with the caller's current directory used as its workspace.
+exec /data1/peerd/ibrahih3/scagent-oc-spike/scagent "$@"

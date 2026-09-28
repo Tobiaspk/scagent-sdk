@@ -13,19 +13,24 @@ On Iris, from the project root:
 
 ```bash
 source setup_gpu.sh
-scagent start
+scagent
 ```
 
 `setup_gpu.sh` syncs and activates the locked uv control plane (Python 3.12), ensures the locked
 Pixi compute runtimes (RAPIDS, CellBender, diffxpy) exist, and starts the configured LiteLLM
 gateway. It is safe to source repeatedly; the first run may take a while to build environments.
 
+`scagent` starts the OpenCode-backed interface in the current directory using the repository's
+canonical `configs/opencode/iris.json`. The same configuration is used from any external analysis
+workspace. Reasoning is controlled by that JSON model entry. The native SDK terminal remains
+available explicitly as `scagent-sdk start`.
+
 Start with a dataset, or resume:
 
 ```bash
-scagent start --data /absolute/path/to/matrix.h5 --prompt "Analyze this PBMC dataset."
-scagent start --resume            # latest session
-scagent start --resume <session-id>
+scagent-sdk start --data /absolute/path/to/matrix.h5 --prompt "Analyze this PBMC dataset."
+scagent-sdk start --resume            # latest session
+scagent-sdk start --resume <session-id>
 ```
 
 Inside the terminal, `/state`, `/session`, `/skills`, `/help`, and `/exit` are local commands.
@@ -67,8 +72,8 @@ scagent-sdk capability validate
 scagent-sdk doctor environment
 ```
 
-`scagent-sdk` is the command name; `scagent` is an equivalent alias installed in this project's
-venv.
+`scagent-sdk` is the native runtime command. `scagent` is the OpenCode-backed interface used for
+interactive OpenCode analyses and architecture evaluations.
 
 ## Documentation
 

@@ -26,7 +26,6 @@ dev = [
 ]
 
 [project.scripts]
-scagent = "scagent_sdk.cli:main"
 scagent-sdk = "scagent_sdk.cli:main"
 
 [tool.hatch.build.targets.wheel]

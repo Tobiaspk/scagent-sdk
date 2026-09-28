@@ -1,0 +1,46 @@
+schema_version: 1
+skill:
+  id: foundation-model-embedding
+  version: "0.1.0"
+  description: Single-cell foundation model embeddings through biorun's versioned transform layer, always reported next to a PCA-50 baseline, plus a weights-free input check that says whether a dataset is acceptable to each model.
+readiness:
+  entrypoint: scripts/readiness.py:probe
+  environment: biorun
+tools:
+  - name: check_dataset_for_fm
+    description: Run each foundation model's input validation against a dataset without loading any weights or touching a GPU. Answers in seconds what a failed embedding job answers in twenty minutes - whether the counts, the gene identifier space and the required metadata are what a given model expects. Run this before embed_cells_with_fm, and before promising a user any foundation model result.
+    entrypoint: scripts/run_biorun.py:check
+    environment: biorun
+    activity_label: Checking dataset against foundation models
+    input_schema:
+      type: object
+      properties:
+        path: {type: string, description: "H5AD with raw counts in the selected layer or X. Omit to use the session's current matrix."}
+        model: {type: string, default: all, description: "Registry id (e.g. geneformer/v2-316m) or 'all' to check every implemented model."}
+        counts_layer: {type: [string, "null"], default: null, description: Layer holding raw counts; null means adata.X.}
+      required: []
+      additionalProperties: false
+    primary_matrix_input: path
+  - name: embed_cells_with_fm
+    description: Embed cells with a single-cell foundation model through biorun, which reproduces that model's own published preprocessing, refuses input the model would silently mishandle, and computes a PCA-50 baseline on the same cells with the same metrics. Returns the embedding, the side-by-side metric table, and full provenance. Needs a GPU for anything above a few thousand cells.
+    entrypoint: scripts/run_biorun.py:embed
+    environment: biorun
+    activity_label: Embedding cells with a foundation model
+    input_schema:
+      type: object
+      properties:
+        path: {type: string, description: "H5AD with raw counts in the selected layer or X. Omit to use the session's current matrix."}
+        model: {type: string, description: "Registry id: geneformer/v2-316m, scgpt/human, uce/4l, transcriptformer/tf-sapiens, state/se-600m, or baseline-only."}
+        counts_layer: {type: [string, "null"], default: null, description: Layer holding raw counts; null means adata.X.}
+        layer: {type: [string, integer], default: last, description: "Which hidden layer to read: 'last', 'intermediate', or an integer index."}
+        pooling: {type: [string, "null"], default: null, enum: [mean, cls, none, null], description: "How to pool token embeddings into a cell embedding. null uses the model's own published convention, which is what its authors report; override only deliberately."}
+        label_key: {type: [string, "null"], default: null, description: obs column scored by both the model and the baseline. Auto-detected when null; a column derived from a PCA pipeline on this same data makes the comparison circular.}
+        batch_key: {type: [string, "null"], default: null, description: obs column used for the batch-mixing metric, when one exists.}
+        baseline: {type: string, default: pca-50, enum: [pca-50, none], description: "The simple method run on the same cells. 'none' is a deliberate choice to report a foundation model with nothing to compare it against."}
+        batch_size: {type: integer, minimum: 1, maximum: 256, default: 8}
+        seed: {type: integer, default: 0}
+        max_cells: {type: [integer, "null"], default: null, description: Subsample to this many cells (seeded, stratified by label_key when present) before embedding. Use for a first look at a large dataset rather than waiting on the full matrix.}
+      required: [model]
+      additionalProperties: false
+    primary_matrix_input: path
+    primary_matrix_output: fm-embedded-anndata
