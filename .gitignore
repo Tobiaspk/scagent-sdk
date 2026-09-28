@@ -19,3 +19,11 @@ sessions/
 # macOS metadata
 ._*
 .DS_Store
+
+# kept local, not published
+docs/
+design/
+claude_update.md
+scripts/*
+!scripts/bootstrap_agent.sh
+!scripts/bootstrap_compute.sh
