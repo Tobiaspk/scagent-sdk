@@ -27,3 +27,4 @@ claude_update.md
 scripts/*
 !scripts/bootstrap_agent.sh
 !scripts/bootstrap_compute.sh
+!scripts/validate_compute_runtime.py
