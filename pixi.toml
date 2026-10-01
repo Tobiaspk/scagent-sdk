@@ -52,6 +52,9 @@ MPLBACKEND = "Agg"
 CUDA_HOME = "$CONDA_PREFIX"
 LD_PRELOAD = "$CONDA_PREFIX/lib/libstdc++.so.6:$CONDA_PREFIX/lib/libnvJitLink.so.13"
 
+[feature.rapids.tasks]
+check = "python scripts/validate_compute_runtime.py rapids"
+
 [feature.cellbender]
 platforms = ["linux-64"]
 
@@ -64,6 +67,9 @@ cellbender = "==0.3.2"
 
 [feature.cellbender.activation.env]
 MPLBACKEND = "Agg"
+
+[feature.cellbender.tasks]
+check = "python scripts/validate_compute_runtime.py cellbender"
 
 [feature.diffxpy]
 platforms = ["linux-64"]
@@ -88,6 +94,9 @@ patsy = "==0.5.6"
 MPLBACKEND = "Agg"
 TF_CPP_MIN_LOG_LEVEL = "3"
 CUDA_VISIBLE_DEVICES = ""
+
+[feature.diffxpy.tasks]
+check = "python scripts/validate_compute_runtime.py diffxpy"
 
 [environments]
 rapids = { features = ["rapids"], no-default-feature = true }

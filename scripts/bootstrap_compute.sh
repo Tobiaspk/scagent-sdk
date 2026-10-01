@@ -34,4 +34,10 @@ for PIXI_ENV in "${PIXI_ENVS[@]}"; do
         "${LOCKED_ARGS[@]}" \
         --environment "$PIXI_ENV" \
         --manifest-path "$PIXI_MANIFEST"
+
+    $PIXI_EXEC run \
+        "${LOCKED_ARGS[@]}" \
+        --environment "$PIXI_ENV" \
+        --manifest-path "$PIXI_MANIFEST" \
+        check
 done
