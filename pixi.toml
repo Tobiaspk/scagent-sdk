@@ -1,7 +1,10 @@
 [workspace]
 name = "scagent-sdk-compute"
 channels = ["conda-forge", "rapidsai", "nvidia"]
-platforms = ["linux-64"]
+platforms = [
+    "linux-64",
+    { name = "linux-64-cuda-13-1", platform = "linux-64", cuda = "13.1", glibc = "2.28" },
+]
 
 # This workspace owns scientific compute runtimes only. The Claude SDK, terminal,
 # state store, media, and web stack remain in the uv-managed agent .venv.
@@ -12,10 +15,7 @@ platforms = ["linux-64"]
 # priority; Pixi has no flexible mode, so the lock is resolved across channels
 # and then freezes exact package URLs and hashes.
 channel-priority = "disabled"
-
-[feature.rapids.system-requirements]
-cuda = "13.1"
-libc = { family = "glibc", version = "2.28" }
+platforms = ["linux-64-cuda-13-1"]
 
 [feature.rapids.dependencies]
 python = "3.14.*"
@@ -55,6 +55,9 @@ LD_PRELOAD = "$CONDA_PREFIX/lib/libstdc++.so.6:$CONDA_PREFIX/lib/libnvJitLink.so
 [feature.rapids.tasks]
 check = "python scripts/validate_compute_runtime.py rapids"
 
+[feature.cellbender]
+platforms = ["linux-64"]
+
 [feature.cellbender.dependencies]
 python = "3.10.*"
 pip = "*"
@@ -67,6 +70,9 @@ MPLBACKEND = "Agg"
 
 [feature.cellbender.tasks]
 check = "python scripts/validate_compute_runtime.py cellbender"
+
+[feature.diffxpy]
+platforms = ["linux-64"]
 
 [feature.diffxpy.dependencies]
 python = "3.9.*"

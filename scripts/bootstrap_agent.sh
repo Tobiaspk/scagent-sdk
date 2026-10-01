@@ -1,68 +1,36 @@
 #!/usr/bin/env bash
 
-set -u
+set -euo pipefail
 
-_SCAGENT_BOOTSTRAP_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-_SCAGENT_BOOTSTRAP_UV="${SCAGENT_SDK_UV:-$(command -v uv 2>/dev/null || true)}"
-_SCAGENT_BOOTSTRAP_STAMP="${_SCAGENT_BOOTSTRAP_ROOT}/.agent-env.stamp"
-_SCAGENT_BOOTSTRAP_VENV="${_SCAGENT_BOOTSTRAP_ROOT}/.venv"
+PYTHON_VERSION=3.14
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+VENV_DIR="$ROOT/.venv"
 
-if [[ -z "${_SCAGENT_BOOTSTRAP_UV}" || ! -x "${_SCAGENT_BOOTSTRAP_UV}" ]]; then
-  echo "scagent-sdk bootstrap requires uv" >&2
-  exit 1
-fi
+# setup uv path (UV_EXEC) from .env
+source "$ROOT/.env"
 
-_scagent_environment_digest() {
-  (
-    cd "${_SCAGENT_BOOTSTRAP_ROOT}" || exit 1
-    sha256sum pyproject.toml uv.lock .python-version | sha256sum | awk '{print $1}'
-  )
-}
-
-_SCAGENT_BOOTSTRAP_EXPECTED="$(_scagent_environment_digest)" || exit 1
-if [[ -x "${_SCAGENT_BOOTSTRAP_VENV}/bin/python" \
-      && -f "${_SCAGENT_BOOTSTRAP_STAMP}" \
-      && "$(<"${_SCAGENT_BOOTSTRAP_STAMP}")" == "${_SCAGENT_BOOTSTRAP_EXPECTED}" ]]; then
-  exit 0
-fi
-
-echo "Bootstrapping locked scagent-sdk agent environment..."
-"${_SCAGENT_BOOTSTRAP_UV}" python install 3.12 >/dev/null || exit 1
-
-if [[ -x "${_SCAGENT_BOOTSTRAP_VENV}/bin/python" ]]; then
-  _SCAGENT_BOOTSTRAP_BASE="$(${_SCAGENT_BOOTSTRAP_VENV}/bin/python -c 'import sys; print(sys.base_prefix)' 2>/dev/null || true)"
-  if [[ "${_SCAGENT_BOOTSTRAP_BASE}" == *"miniconda"* ]]; then
-    _SCAGENT_BOOTSTRAP_BACKUP="${_SCAGENT_BOOTSTRAP_ROOT}/.venv.legacy-conda"
-    if [[ -e "${_SCAGENT_BOOTSTRAP_BACKUP}" ]]; then
-      _SCAGENT_BOOTSTRAP_BACKUP="${_SCAGENT_BOOTSTRAP_BACKUP}.$(date +%Y%m%d%H%M%S)"
+# pass --update-lock-file to re-solve uv.lock instead of requiring it up-to-date
+LOCKED_ARGS=(--locked)
+for arg in "$@"; do
+    if [[ "$arg" == "--update-lock-file" ]]; then
+        LOCKED_ARGS=()
     fi
-    echo "Preserving Conda-linked agent venv at ${_SCAGENT_BOOTSTRAP_BACKUP}"
-    mv "${_SCAGENT_BOOTSTRAP_VENV}" "${_SCAGENT_BOOTSTRAP_BACKUP}" || exit 1
-  fi
+done
+
+# install python & create venv (skip if it already exists)
+$UV_EXEC python install "$PYTHON_VERSION"
+if [[ ! -x "$VENV_DIR/bin/python" ]]; then
+    $UV_EXEC venv \
+        --python "$PYTHON_VERSION" \
+        --python-preference only-managed \
+        --prompt scagent-sdk \
+        "$VENV_DIR"
 fi
 
-if [[ ! -x "${_SCAGENT_BOOTSTRAP_VENV}/bin/python" ]]; then
-  "${_SCAGENT_BOOTSTRAP_UV}" venv \
-    --python 3.12 \
-    --python-preference only-managed \
-    --prompt scagent-sdk \
-    "${_SCAGENT_BOOTSTRAP_VENV}" || exit 1
-fi
-
-(
-  cd "${_SCAGENT_BOOTSTRAP_ROOT}" || exit 1
-  UV_PROJECT_ENVIRONMENT="${_SCAGENT_BOOTSTRAP_VENV}" \
-    "${_SCAGENT_BOOTSTRAP_UV}" sync \
-      --locked \
-      --all-extras \
-      --link-mode copy \
-      --python 3.12 \
-      --python-preference only-managed
-) || exit 1
-
-_scagent_environment_digest >"${_SCAGENT_BOOTSTRAP_STAMP}" || exit 1
-echo "scagent-sdk agent environment is synchronized with uv.lock"
-
-unset _SCAGENT_BOOTSTRAP_ROOT _SCAGENT_BOOTSTRAP_UV _SCAGENT_BOOTSTRAP_STAMP
-unset _SCAGENT_BOOTSTRAP_VENV _SCAGENT_BOOTSTRAP_EXPECTED _SCAGENT_BOOTSTRAP_BASE
-unset _SCAGENT_BOOTSTRAP_BACKUP
+# sync dependencies into the venv
+UV_PROJECT_ENVIRONMENT="$VENV_DIR" $UV_EXEC sync \
+    "${LOCKED_ARGS[@]}" \
+    --all-extras \
+    --link-mode copy \
+    --python "$PYTHON_VERSION" \
+    --python-preference only-managed
